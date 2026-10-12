@@ -31,7 +31,7 @@ fn main() {
 /// Averages hide hitches. Per 5 s window: worst frame, frames over 20 ms, and the worst main-world CPU time
 /// (First..Last) so a slow frame can be told apart as sim/ECS-bound (cpu ~ frame) or render/GPU-bound (cpu small),
 /// plus the camera height at the worst frame.
-#[derive(Default)]
+#[derive(Resource, Default)]
 struct Window5 {
     start: Option<std::time::Instant>,
     worst: f32,
