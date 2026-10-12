@@ -45,6 +45,7 @@ R40: every driveway ends at a building or at a dotted outline of the lot it serv
 Save / load (R27): the whole game survives a relaunch. The world regenerates from the seed; the save stores what
 - const SAVE_VERSION
 - fn encode
+- fn fresh_preset
 - fn parse
 - struct AgencySave
 - struct GameSave

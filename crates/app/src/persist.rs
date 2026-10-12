@@ -415,7 +415,7 @@ fn hand_ui(mouse: Res<ButtonInput<MouseButton>>, mut hand: ResMut<crate::roads::
 }
 #[derive(Component, PartialEq, Eq, Clone, Copy)]
 enum DialogButton {
-    Yes,
+    Yes(u8),
     No,
 }
 
@@ -467,7 +467,9 @@ fn spawn_reset_ui(mut commands: Commands) {
             .with_children(|p| {
                 p.spawn((Text::new("Start a fresh city? Your current city is deleted."), TextFont { font: crate::hud::ui_font(), font_size: FontSize::Px(16.0), ..default() }, TextColor(INK)));
                 p.spawn(Node { column_gap: Val::Px(10.0), justify_content: JustifyContent::Center, ..default() }).with_children(|r| {
-                    r.spawn((DialogButton::Yes, btn("Reset", Color::srgb(0.95, 0.65, 0.62))));
+                    for (i, name) in ["Hamlet", "Small town", "Large town"].into_iter().enumerate() {
+                        r.spawn((DialogButton::Yes(i as u8), btn(name, Color::srgb(0.95, 0.65, 0.62))));
+                    }
                     r.spawn((DialogButton::No, btn("Cancel", Color::srgb(0.90, 0.92, 0.96))));
                 });
             });
@@ -498,13 +500,46 @@ fn reset_ui(
         return;
     }
     match dialog_btns.iter().find(|(_, h)| h.get()).map(|(b, _)| *b) {
-        Some(DialogButton::Yes) => {
+        Some(DialogButton::Yes(p)) => {
             state.done = true;
             clear_raw();
+            write_preset(&format!("{p} {}", new_seed()));
             relaunch();
             exit.write(AppExit::Success);
         }
         Some(DialogButton::No) | None => state.confirming = false,
+    }
+}
+
+/// The reset menu's choice survives the relaunch (and later restarts) as "preset seed", next to the save.
+pub fn fresh_preset() -> Option<(city::organic::Preset, u64)> {
+    parse_preset(&read_preset()?)
+}
+fn parse_preset(t: &str) -> Option<(city::organic::Preset, u64)> {
+    use city::organic::Preset::*;
+    let (p, seed) = t.trim().split_once(' ')?;
+    Some(([Hamlet, SmallTown, LargeTown].get(p.parse::<usize>().ok()?).copied()?, seed.parse().ok()?))
+}
+fn new_seed() -> u64 {
+    // each reset steps the previous preset seed: a different town every time, no clock needed
+    world_gen::rng::SplitMix64::new(fresh_preset().map_or(0x5EED, |(_, s)| s)).next_u64()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn read_preset() -> Option<String> {
+    std::fs::read_to_string(save_path().with_extension("preset")).ok()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn write_preset(t: &str) {
+    let _ = std::fs::write(save_path().with_extension("preset"), t);
+}
+#[cfg(target_arch = "wasm32")]
+fn read_preset() -> Option<String> {
+    store()?.get_item("macrometro.preset").ok().flatten()
+}
+#[cfg(target_arch = "wasm32")]
+fn write_preset(t: &str) {
+    if let Some(s) = store() {
+        let _ = s.set_item("macrometro.preset", t);
     }
 }
 
@@ -544,6 +579,15 @@ mod tests {
             rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)], level: 1 }],
             agencies: vec![AgencySave { id: 1, standing: 0.42, spend: vec![(0, 55.5), (2, 1.0)] }],
         }
+    }
+
+    #[test]
+    fn reset_preset_marker_parses() {
+        use city::organic::Preset::*;
+        assert_eq!(parse_preset("2 99\n"), Some((LargeTown, 99)));
+        assert_eq!(parse_preset("0 5"), Some((Hamlet, 5)));
+        assert_eq!(parse_preset("3 5"), None);
+        assert_eq!(parse_preset("junk"), None);
     }
 
     #[test]

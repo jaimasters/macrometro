@@ -91,7 +91,6 @@ pub fn plan_preset(seed: u64, core: Vec2, preset: Preset) -> TownPlan {
     let mut rng = SplitMix64::new(seed ^ 0x0E6A_1C);
     let mut g = G { g: RoadGraph::default() };
     let c = g.node(core);
-    let mut order = 0;
     let turn = f(&mut rng) as f32 * std::f32::consts::TAU;
     // skeleton: both directions from the core, so a two-road town crosses in the middle (one real junction)
     for k in 0..roads {
