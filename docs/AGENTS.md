@@ -20,3 +20,6 @@ Efficiency (usage audit 2026-10-13):
 - Hops: coordinator briefs managers once; no manager for a single-feature task (spawn one high worker directly, as R31 did). Managers do not relay status back up unless done or blocked.
 - Edit with Edit tool or one script per file; never re-run 10+ inline python heredoc patches on the same file (mgr-city: 16x same app/src heredoc).
 - Merge from a manager branch once per milestone, not per fix (mgr-city fetched+merged 11x).
+- Behaviour gate: a feature Jai can see (roads, cars, stations) needs one headless sim test of the visible behaviour before merge, e.g. cars complete a lap of a roundabout, no car despawns before arrival, station footprint fits its platforms. R28/R31 merged with unit tests only; Jai then reported "roundabouts not working / wrong size" and "cars still randomly despawn" (22:56-22:57).
+- Visual claims: say "built + tested, not visually checked" unless a screenshot was taken. Never report a visual feature as working from tests alone.
+- Mac first: check `ssh -o ConnectTimeout=5 100.104.143.66 true` once before a build plan; on failure build small crates locally and say so (ssh timeouts, rsync drops, missing ./mac.sh cost retries).
