@@ -65,4 +65,5 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | 8 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
 | 9 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
 | 10 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
+| 11 | TOP (regression): left-hand rule on roundabouts — clockwise ring, give way to ring traffic from right, enter/exit left lane; junctions + straights keep left; headless test | in progress, top | presets worker (mgr-roads) | B2 |
 
