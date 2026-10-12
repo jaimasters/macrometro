@@ -76,6 +76,12 @@ pub struct GameSave {
     /// Upgraded road lane classes (edge, class index).
     #[serde(default)]
     pub lanes: Vec<(u32, u8)>,
+    /// Trains bought per line (line index, count).
+    #[serde(default)]
+    pub extra_trains: Vec<(u32, u8)>,
+    /// Sidings (station cells).
+    #[serde(default)]
+    pub sidings: Vec<(i32, i32)>,
     pub agencies: Vec<AgencySave>,
 }
 
@@ -200,6 +206,7 @@ struct Collect<'w> {
     geoms: Res<'w, RailGeoms>,
     classes: Res<'w, RoadClasses>,
     hand: Res<'w, crate::roads::LeftHand>,
+    trains: Res<'w, crate::rails::Trains>,
 }
 
 impl Collect<'_> {
@@ -255,6 +262,8 @@ impl Collect<'_> {
             tracks,
             rails,
             left_hand: self.hand.0,
+            sidings: { let mut v: Vec<(i32, i32)> = self.stations.0.iter().filter(|c| self.map.node(**c).is_some_and(|n| self.trains.0.sidings.contains_key(&n.0))).map(xy).collect(); v.sort(); v },
+            extra_trains: self.trains.0.extra.iter().map(|(l, n)| (*l, *n as u8)).collect(),
             lanes: { let mut v: Vec<(u32, u8)> = self.classes.0.iter().map(|(e, c)| (*e as u32, *c as u8)).collect(); v.sort(); v },
             agencies: self
                 .eco
@@ -265,6 +274,10 @@ impl Collect<'_> {
                 .collect(),
         })
     }
+}
+
+fn map_node(map: &StationMap, c: IVec2) -> Option<transit::NodeId> {
+    map.node(c)
 }
 
 /// Replay a loaded game into the live resources (no charges: money is restored from the save).
@@ -281,10 +294,13 @@ fn restore_game(
     mut razed: ResMut<Razed>,
     mut classes: ResMut<RoadClasses>,
     mut hand: ResMut<crate::roads::LeftHand>,
+    mut trains: ResMut<crate::rails::Trains>,
     link: Res<crate::zones::GrowthLink>,
 ) {
     let Some(g) = &loaded.0 else { return };
     hand.0 = g.left_hand;
+    trains.0.sidings = g.sidings.iter().filter_map(|c| map_node(&map, IVec2::new(c.0, c.1))).map(|n| (n.0, transit::trains::SIDING_CAPACITY)).collect();
+    trains.0.extra = g.extra_trains.iter().map(|(l, n)| (*l, *n as usize)).collect();
     for &(e, c) in &g.lanes {
         classes.0.insert(e as usize, city::lanes::LANE_CLASSES[(c as usize).min(6)]);
         link.shared.lanes.lock().unwrap().push((e as usize, c));
@@ -522,6 +538,8 @@ mod tests {
             platforms: vec![((0, 12), 3), ((40, 12), 1)],
             tracks: vec![((0, 12), (40, 12), 4)],
             left_hand: true,
+            extra_trains: vec![(0, 2)],
+            sidings: vec![(0, 12)],
             lanes: vec![(2, 3)],
             rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)], level: 1 }],
             agencies: vec![AgencySave { id: 1, standing: 0.42, spend: vec![(0, 55.5), (2, 1.0)] }],

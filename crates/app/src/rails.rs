@@ -50,7 +50,6 @@ struct Visuals {
     cylinder: Handle<Mesh>,
     cuboid: Handle<Mesh>,
     capsule: Handle<Mesh>,
-    train: Handle<StandardMaterial>,
     lines: Vec<Handle<StandardMaterial>>,
     beds: Vec<Handle<StandardMaterial>>,
 }
@@ -73,16 +72,23 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
         cylinder: meshes.add(Cylinder::new(1.0, 1.0)),
         cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         capsule: meshes.add(Capsule3d::new(2.0, 3.5)),
-        train: flat(Color::srgb(0.98, 0.98, 0.98)),
         lines: LINE_COLOURS.iter().map(|&(r, g, b)| flat(Color::srgb(r, g, b))).collect(),
         beds: LINE_COLOURS.iter().map(|&(r, g, b)| flat(Color::srgb(r * 0.45, g * 0.45, b * 0.45))).collect(),
     });
 }
 
-fn step_trains(net: Res<TransitNet>, mut trains: ResMut<Trains>, link: Option<Res<crate::zones::GrowthLink>>, cp: Option<Res<crate::zones::CityPlan>>, mut tick: Local<u32>) {
+fn step_trains(net: Res<TransitNet>, map: Option<Res<crate::shell::StationMap>>, layout: Option<Res<crate::zones::ZoneLayout>>, mut trains: ResMut<Trains>, link: Option<Res<crate::zones::GrowthLink>>, cp: Option<Res<crate::zones::CityPlan>>, mut tick: Local<u32>) {
     trains.0.step(&net.0);
     // once a second of sim time hand the road closures (trains on level crossings) to the traffic model
     *tick += 1;
+    if *tick % 64 == 1 {
+        if let (Some(map), Some(layout), Some(link)) = (map, layout, link.as_ref()) {
+            // people arrive at each station at the rate the surrounding city would put on transit (est. spread over ~3 minutes)
+            let snap = link.snapshots.latest();
+            let zones: Vec<(Vec2, f32, f32)> = layout.0.iter().enumerate().map(|(i, g)| (g.center, snap.pop.get(i).copied().unwrap_or(0.0), snap.zone_share.get(i).copied().unwrap_or(0.0))).collect();
+            trains.0.arrivals = map.by_cell.iter().map(|(c, n)| (n.0, crate::station_menu::waiting_estimate(c.as_vec2(), &zones) as f64 / 180.0)).collect();
+        }
+    }
     if *tick % 64 == 0 {
         if let (Some(link), Some(cp)) = (link, cp) {
             let mut closed = vec![0.0f32; cp.plan.graph.edges.len()];
@@ -255,7 +261,7 @@ fn lod_lines(cam: Option<Res<MapCam>>, mut thick: Query<&mut Visibility, (With<T
     }
 }
 
-fn sync_trains(trains: Res<Trains>, vis: Option<Res<Visuals>>, q: Query<(Entity, &TrainVisual)>, mut commands: Commands) {
+fn sync_trains(trains: Res<Trains>, vis: Option<Res<Visuals>>, q: Query<(Entity, &TrainVisual)>, mut commands: Commands, mut mats: ResMut<Assets<StandardMaterial>>) {
     let Some(vis) = vis else { return };
     for (e, t) in &q {
         if !trains.0.trains.iter().any(|s| s.id == t.id) {
@@ -266,10 +272,17 @@ fn sync_trains(trains: Res<Trains>, vis: Option<Res<Visuals>>, q: Query<(Entity,
         commands.spawn((
             TrainVisual { id: s.id, lat: Vec2::ZERO, dwelling: false },
             Mesh3d(vis.capsule.clone()),
-            MeshMaterial3d(vis.train.clone()),
+            // own material per train so its body colour can show its load
+            MeshMaterial3d(mats.add(StandardMaterial { base_color: load_colour(0.0), unlit: true, ..default() })),
             Transform::from_xyz(0.0, -50.0, 0.0),
         ));
     }
+}
+
+/// Body colour by load share: white empty -> red full.
+pub fn load_colour(share: f64) -> Color {
+    let k = share.clamp(0.0, 1.0) as f32;
+    Color::srgb(0.98, 0.98 - 0.72 * k, 0.98 - 0.76 * k)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -281,12 +294,19 @@ fn move_trains(
     paths: Res<LinePaths>,
     cam: Option<Res<MapCam>>,
     mut sound: MessageWriter<SoundEvent>,
-    mut q: Query<(&mut TrainVisual, &mut Transform)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&mut TrainVisual, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     let alpha = fixed.overstep_fraction() as f64;
     let blend = 1.0 - (-8.0 * time.delta_secs()).exp();
-    for (mut tv, mut tf) in &mut q {
+    for (mut tv, mut tf, mh) in &mut q {
         let Some(t) = trains.0.trains.iter().find(|s| s.id == tv.id) else { continue };
+        if let Some(mut m) = mats.get_mut(&mh.0) {
+            let c = load_colour(t.load / transit::trains::TRAIN_CAPACITY);
+            if m.base_color != c {
+                m.base_color = c;
+            }
+        }
         let (Some(path), Some(total)) = (paths.0.get(&(t.line.0 as usize)), trains.0.line_total(t.line)) else { continue };
         let scale = path_len(path) / total.max(1e-6) as f32;
         let front = trains.0.route_pos(t, alpha);
@@ -355,5 +375,10 @@ mod tests {
         assert_eq!(p[idx[1] + 1], Vec2::new(20.0, 8.0), "arc is walked b -> a");
         assert_eq!(p[idx[2]], Vec2::ZERO);
         assert_eq!(idx[0], 0);
+    }
+
+    #[test]
+    fn full_trains_are_redder_than_empty_ones() {
+        assert!(load_colour(1.0).to_srgba().green < load_colour(0.0).to_srgba().green);
     }
 }

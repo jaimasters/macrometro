@@ -29,6 +29,8 @@ enum MenuAction {
     Extend(usize),
     NewLine,
     Platform,
+    /// Buy a siding for spare trains here.
+    Siding,
     /// +1 track on the segment to the neighbouring station on this cell.
     Track(IVec2),
     /// Next curve radius up on the segment to this neighbour.
@@ -91,6 +93,7 @@ pub enum MenuActionKind {
     Extend(usize),
     NewLine,
     Platform,
+    Siding,
     Track(IVec2),
     Curve(IVec2),
     Crossings(IVec2),
@@ -103,6 +106,7 @@ impl From<MenuActionKind> for MenuAction {
             MenuActionKind::Extend(l) => MenuAction::Extend(l),
             MenuActionKind::NewLine => MenuAction::NewLine,
             MenuActionKind::Platform => MenuAction::Platform,
+            MenuActionKind::Siding => MenuAction::Siding,
             MenuActionKind::Track(n) => MenuAction::Track(n),
             MenuActionKind::Curve(n) => MenuAction::Curve(n),
             MenuActionKind::Crossings(n) => MenuAction::Crossings(n),
@@ -135,6 +139,7 @@ fn rebuild_menu(
     link: Res<GrowthLink>,
     razed: Res<Razed>,
     geoms: Res<RailGeoms>,
+    trains: Res<crate::rails::Trains>,
     old: Query<Entity, With<MenuRoot>>,
     mut commands: Commands,
 ) {
@@ -194,6 +199,9 @@ fn rebuild_menu(
             let land = |p: Vec2| city::is_land(seed.0, p);
             let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &gone, land: &land };
             let mut upgrades: Vec<(MenuActionKind, String)> = vec![];
+            if map.node(cell).is_some_and(|n| !trains.0.sidings.contains_key(&n.0)) {
+                upgrades.push((MenuActionKind::Siding, format!("+ Siding  ({:.0}, stores {} trains)", crate::shell::SIDING_COST, transit::trains::SIDING_CAPACITY)));
+            }
             for n in neighbours(&lines, cell) {
                 let to = station_name(seed.0, &layout.0, n.as_vec2());
                 if let Some(u) = curve_upgrade(&ctx, &geoms, &net.0, &map, cell, n) {
@@ -226,8 +234,8 @@ fn button(parent: &mut ChildSpawnerCommands, action: MenuAction, text: &str) {
 fn update_menu(
     cam: Option<Res<MapCam>>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<Camera3d>>>,
-    layout: Res<ZoneLayout>,
-    link: Res<GrowthLink>,
+    map: Res<StationMap>,
+    trains: Res<crate::rails::Trains>,
     mut roots: Query<(&MenuRoot, &mut Node)>,
     mut waiting: Query<&mut Text, With<WaitingText>>,
     mut buttons: Query<(&Hovered, &mut BackgroundColor), With<MenuButton>>,
@@ -241,7 +249,6 @@ fn update_menu(
     if roots.is_empty() {
         return;
     }
-    let s = link.snapshots.latest();
     let (Some(_), Some(camera)) = (cam, camera) else { return };
     let (camera, tf) = *camera;
     for (r, mut node) in &mut roots {
@@ -250,9 +257,8 @@ fn update_menu(
             node.left = Val::Px(v.x + 26.0);
             node.top = Val::Px((v.y - 30.0).max(8.0));
         }
-        let zones: Vec<(Vec2, f32, f32)> =
-            layout.0.iter().enumerate().map(|(i, g)| (g.center, s.pop.get(i).copied().unwrap_or(0.0), s.zone_share.get(i).copied().unwrap_or(0.0))).collect();
-        let line = format!("Waiting ~{}", waiting_estimate(p, &zones));
+        let n = map.node(r.0).map_or(0.0, |n| trains.0.waiting_at(n));
+        let line = format!("Waiting {}", n.round() as u32);
         for mut t in &mut waiting {
             if t.0 != line {
                 t.0 = line.clone();
@@ -292,6 +298,9 @@ fn menu_clicks(
         }
         MenuAction::Track(other) => {
             out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeTracks { a: cell, b: other } });
+        }
+        MenuAction::Siding => {
+            out.write(ToolCommand { agency: agency.0, action: ToolAction::AddSiding { cell } });
         }
         MenuAction::Curve(other) => {
             out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeCurve { a: cell, b: other } });

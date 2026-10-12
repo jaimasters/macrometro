@@ -19,6 +19,14 @@ const PLAN: f64 = 0.9;
 /// Gap between successive departures from the first stop (seconds).
 pub const HEADWAY: f64 = 40.0;
 const MAX_TRAINS: usize = 8;
+/// Most trains the player can add to a line on top of the scheduled fleet (R37).
+pub const MAX_EXTRA_TRAINS: usize = 4;
+/// Spare trains one siding stores.
+pub const SIDING_CAPACITY: usize = 2;
+/// Passengers a train carries at most, share of the load that gets off at each stop, and the cap on a station queue.
+pub const TRAIN_CAPACITY: f64 = 60.0;
+const ALIGHT: f64 = 0.4;
+const MAX_WAITING: f64 = 400.0;
 
 /// Tunable table per train type (world units, seconds).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,6 +75,8 @@ pub struct Train {
     /// Platform slot held: (station, slot index).
     pub slot: Option<(NodeId, u8)>,
     pub len: f64,
+    /// Passengers on board.
+    pub load: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +158,13 @@ pub struct TrainSim {
     counted: u64,
     /// Single-track segments claimed this tick by a departing train: edge -> (travelling a->b, train id).
     claims: BTreeMap<usize, (bool, u32)>,
+    /// People waiting per station node, and the arrival rate (people / s) the app feeds in from the city.
+    pub waiting: BTreeMap<u32, f64>,
+    pub arrivals: BTreeMap<u32, f64>,
+    /// Trains the player bought per line (on top of the scheduled fleet).
+    pub extra: BTreeMap<u32, usize>,
+    /// Sidings (depots) bought per station node: how many spare trains each stores.
+    pub sidings: BTreeMap<u32, usize>,
 }
 
 impl TrainSim {
@@ -205,6 +222,10 @@ impl TrainSim {
         self.tick += 1;
         self.counted += 1;
         self.claims.clear();
+        for (n, r) in &self.arrivals {
+            let w = self.waiting.entry(*n).or_default();
+            *w = (*w + r * DT).min(MAX_WAITING);
+        }
         let snap = self.trains.clone();
         let mut trains = std::mem::take(&mut self.trains);
         for t in trains.iter_mut() {
@@ -222,7 +243,7 @@ impl TrainSim {
         for ri in 0..self.routes.len() {
             let r = &mut self.routes[ri];
             r.since_spawn = r.since_spawn.saturating_add(1);
-            if r.spawned >= r.wants() || (r.since_spawn as f64) * DT < HEADWAY {
+            if r.spawned >= r.wants() + self.extra.get(&r.line.0).copied().unwrap_or(0) || (r.since_spawn as f64) * DT < HEADWAY {
                 continue;
             }
             let (line, class, node) = (r.line, r.class, r.stops[0]);
@@ -241,6 +262,7 @@ impl TrainSim {
                 phase: Phase::Dwell((tt.dwell / DT).ceil() as u32),
                 slot: None,
                 len: tt.length,
+                load: 0.0,
             };
             // never appear on top of a train that is still clearing the platform
             if self.leader(net, &self.trains, &t).is_some_and(|(g, _)| g < MIN_GAP) {
@@ -416,6 +438,13 @@ impl TrainSim {
             t.v = 0.0;
             if t.slot.is_some() {
                 t.phase = Phase::Dwell((tt.dwell / DT).ceil() as u32);
+                // arrived: some get off (all at the terminus), then waiting riders board up to capacity
+                let last = t.k == self.routes[t.route].edges.len();
+                t.load *= if last { 0.0 } else { 1.0 - ALIGHT };
+                let w = self.waiting.entry(node.0).or_default();
+                let on = w.min(TRAIN_CAPACITY - t.load).max(0.0);
+                *w -= on;
+                t.load += on;
             }
         } else {
             t.p += step;
@@ -465,6 +494,37 @@ impl TrainSim {
     /// Track count of the segment the train is on.
     pub fn tracks_under(&self, net: &Network, t: &Train) -> u8 {
         net.edges[self.edge_under(t)].tracks
+    }
+
+    /// Spare-train slots free in sidings at the stations of `line`.
+    pub fn siding_free(&self, line: LineId) -> usize {
+        let Some(r) = self.routes.iter().find(|r| r.line == line) else { return 0 };
+        let mut seen: Vec<NodeId> = vec![];
+        let cap: usize = r.stops.iter().filter(|n| { let new = !seen.contains(n); seen.push(**n); new }).map(|n| self.sidings.get(&n.0).copied().unwrap_or(0)).sum();
+        cap.saturating_sub(self.extra.get(&line.0).copied().unwrap_or(0))
+    }
+
+    /// Buy a siding at a station (one per station); false if it already has one.
+    pub fn add_siding(&mut self, n: NodeId) -> bool {
+        self.sidings.insert(n.0, SIDING_CAPACITY).is_none()
+    }
+
+    /// Buy one more train for `line`: needs free space in a siding on the line; false otherwise or at the cap.
+    pub fn add_train(&mut self, line: LineId) -> bool {
+        if self.siding_free(line) == 0 {
+            return false;
+        }
+        let e = self.extra.entry(line.0).or_default();
+        if *e >= MAX_EXTRA_TRAINS {
+            return false;
+        }
+        *e += 1;
+        true
+    }
+
+    /// People waiting at a station node.
+    pub fn waiting_at(&self, n: NodeId) -> f64 {
+        self.waiting.get(&n.0).copied().unwrap_or(0.0)
     }
 
     /// Platform slot (0-based) and station the train occupies while stopped.

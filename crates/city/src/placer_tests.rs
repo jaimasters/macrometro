@@ -129,3 +129,18 @@ fn a_bigger_radius_is_faster_but_sweeps_more() {
         assert!(u.dot(v) > 0.9 || u == Vec2::ZERO || v == Vec2::ZERO, "sharp corner at {:?}", w[1]);
     }
 }
+
+#[test]
+fn track_leaves_every_station_straight_before_it_bends() {
+    use bevy::math::Vec2;
+    // a sharp bend whose legs are only just longer than the lead-out: the arc must shrink, never start inside it
+    let (a, b, w) = (Vec2::ZERO, Vec2::new(40.0, 40.0), Vec2::new(40.0, 0.0));
+    let (pts, r) = arc_path(a, w, b, 30.0);
+    assert!(r.is_finite() && r < 30.0);
+    let first_bend = pts[1];
+    assert!(first_bend.distance(a) >= STATION_LEAD - 1e-3, "lead-out {}", first_bend.distance(a));
+    assert!(pts[pts.len() - 2].distance(b) >= STATION_LEAD - 1e-3);
+    // collinear with the departure axis: the first leg is exactly the straight a -> w direction
+    assert!((pts[1] - a).normalize().dot((w - a).normalize()) > 0.999);
+}
+

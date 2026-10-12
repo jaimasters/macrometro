@@ -2,7 +2,6 @@
 //! razing). Rails: +Track, wider curve, bridge crossings, and an estimated load. Esc or clicking elsewhere closes it.
 use crate::hud::ui_font;
 use crate::shell::{crossing_upgrades, curve_upgrade, line_geometry, road_upgrade, Lines, RailGeoms, Razed, RoadClasses, StationMap};
-use crate::station_menu::waiting_estimate;
 use crate::stations::SelectedStation;
 use crate::zones::{CityPlan, GrowthLink, ZoneLayout};
 use bevy::picking::hover::Hovered;
@@ -12,8 +11,6 @@ use transit::{Edge, TransitNet};
 use ui_tools::{station_at, ActiveAgency, ActiveTool, CursorWorld, Stations, ToolAction, ToolCommand};
 
 const PICK: f32 = 2.5;
-/// Passengers one train carries (for the estimated load only; the train sim has no passengers yet).
-const TRAIN_CAPACITY: f32 = 60.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Segment {
@@ -124,7 +121,7 @@ fn rebuild_menu(
     lines: Res<Lines>,
     net: Res<TransitNet>,
     map: Res<StationMap>,
-    layout: Res<ZoneLayout>,
+    _layout: Res<ZoneLayout>,
     seed: Res<world_gen::WorldSeed>,
     trains: Res<crate::rails::Trains>,
     old: Query<Entity, With<SegMenu>>,
@@ -166,12 +163,18 @@ fn rebuild_menu(
             let (na, nb) = (map.node(a), map.node(b));
             if let Some(i) = na.zip(nb).and_then(|(x, y)| net.0.rail_edge(x, y)) {
                 let e = &net.0.edges[i];
-                // estimated load: riders waiting at both ends over the capacity of the trains serving this hop
                 let serving: Vec<u32> = lines.all.iter().filter(|l| l.cells.windows(2).any(|w| (w[0], w[1]) == (a, b) || (w[0], w[1]) == (b, a))).map(|l| l.id as u32).collect();
-                let n = trains.0.trains.iter().filter(|t| serving.contains(&t.line.0)).count().max(1) as f32;
-                let zones: Vec<(Vec2, f32, f32)> = layout.0.iter().enumerate().map(|(i, g)| (g.center, snap.pop.get(i).copied().unwrap_or(0.0), snap.zone_share.get(i).copied().unwrap_or(0.0))).collect();
-                let waiting = (waiting_estimate(a.as_vec2(), &zones) + waiting_estimate(b.as_vec2(), &zones)) as f32;
-                rows.push((format!("{} tracks, {} train(s), est. load {:.0}%", e.tracks, n as u32, (waiting / (n * TRAIN_CAPACITY) * 100.0).min(100.0)), None));
+                let on: Vec<f64> = trains.0.trains.iter().filter(|t| serving.contains(&t.line.0)).map(|t| t.load).collect();
+                let mean = if on.is_empty() { 0.0 } else { on.iter().sum::<f64>() / on.len() as f64 };
+                rows.push((format!("{} tracks, {} train(s), load {:.0}%", e.tracks, on.len(), mean / transit::trains::TRAIN_CAPACITY * 100.0), None));
+                for l in &serving {
+                    let have = trains.0.extra.get(l).copied().unwrap_or(0);
+                    if trains.0.siding_free(transit::LineId(*l)) == 0 {
+                        rows.push((format!("Line {}: buy a siding to add trains", l + 1), None));
+                    } else if have < transit::trains::MAX_EXTRA_TRAINS {
+                        rows.push((format!("+ Train on line {}  ({:.0}, {} bought)", l + 1, crate::shell::TRAIN_COST, have), Some(ToolAction::AddTrain { line: *l as usize })));
+                    }
+                }
                 if let Some(c) = Edge::track_cost_between(&net.0, na.unwrap(), nb.unwrap()) {
                     rows.push((format!("+ Track  ({c:.0})"), Some(ToolAction::UpgradeTracks { a, b })));
                 }
