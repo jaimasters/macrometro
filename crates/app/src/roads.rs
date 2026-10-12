@@ -61,14 +61,20 @@ const DASH_GAP: f32 = 1.8;
 
 /// US-style markings for one road (R29): yellow centre line (double solid on 2-lane fast and wider, dashed on minor
 /// two-way roads, none on a one-lane street), dashed white between same-direction lanes, solid white edge lines, and
-/// a stop bar across the incoming half at every junction end. Left-hand driving keeps colours, mirrors the stop bars.
-fn edge_marks(edge: usize, len: f32, half_w: f32, c: city::lanes::LaneClass, junction: [bool; 2], left: bool) -> Vec<RoadMark> {
+/// one thin stop bar across the incoming half at each real (degree 3+) junction end. `trim` cuts every line back from
+/// that end (the junction box or roundabout ring); 0 = a plain join, lines run straight through with no bar.
+/// Left-hand driving keeps colours, mirrors the stop bars.
+fn edge_marks(edge: usize, len: f32, half_w: f32, c: city::lanes::LaneClass, trim: [f32; 2], left: bool) -> Vec<RoadMark> {
     use city::lanes::LaneClass::*;
     let line = |p: Vec2, q: Vec2, yellow: bool| RoadMark { edge, p, q, yellow, fat: 1.0 };
     let mut v = vec![];
+    let (t0, t1) = (trim[0], len - trim[1]);
+    if t1 - t0 < 1.0 {
+        return v;
+    }
     let dashed = |v: &mut Vec<RoadMark>, off: f32, yellow: bool| {
-        let mut t = DASH_GAP / 2.0;
-        while t + DASH < len {
+        let mut t = t0 + DASH_GAP / 2.0;
+        while t + DASH < t1 {
             v.push(line(Vec2::new(t, off), Vec2::new(t + DASH, off), yellow));
             t += DASH + DASH_GAP;
         }
@@ -78,7 +84,7 @@ fn edge_marks(edge: usize, len: f32, half_w: f32, c: city::lanes::LaneClass, jun
         TwoLaneLow => dashed(&mut v, 0.0, true),
         _ => {
             for o in [-0.12, 0.12] {
-                v.push(line(Vec2::new(0.0, o), Vec2::new(len, o), true));
+                v.push(line(Vec2::new(t0, o), Vec2::new(t1, o), true));
             }
         }
     }
@@ -89,14 +95,13 @@ fn edge_marks(edge: usize, len: f32, half_w: f32, c: city::lanes::LaneClass, jun
     }
     let edge_off = half_w - 0.1;
     for side in [-1.0, 1.0] {
-        v.push(line(Vec2::new(0.0, side * edge_off), Vec2::new(len, side * edge_off), false));
+        v.push(line(Vec2::new(t0, side * edge_off), Vec2::new(t1, side * edge_off), false));
     }
     // traffic toward the end at `along = len` drives on the +lateral side (right-hand), toward 0 on the - side
     let s = if left { -1.0 } else { 1.0 };
-    for (end, at, dir) in [(1, len, s), (0, 0.0, -s)] {
-        if junction[end] && len > 4.0 {
-            let t = if end == 1 { at - 1.6 } else { at + 1.6 };
-            v.push(RoadMark { edge, p: Vec2::new(t, 0.0), q: Vec2::new(t, dir * edge_off), yellow: false, fat: 2.5 });
+    for (end, t, dir) in [(1, t1, s), (0, t0, -s)] {
+        if trim[end] > 0.0 {
+            v.push(RoadMark { edge, p: Vec2::new(t, 0.0), q: Vec2::new(t, dir * edge_off), yellow: false, fat: 1.5 });
         }
     }
     v
@@ -418,6 +423,7 @@ fn update_marks(
     classes: Res<RoadClasses>,
     hand: Res<LeftHand>,
     assets: Res<MarkAssets>,
+    j: Option<Res<Journeys>>,
     mut marks: Query<(Entity, &RoadMark, &mut Transform, &mut Visibility)>,
     mut roads: Query<(&RoadEdge, &mut Transform), Without<RoadMark>>,
     mut commands: Commands,
@@ -434,6 +440,7 @@ fn update_marks(
     }
     *last = key;
     if rebuild {
+        let Some(j) = j else { return };
         *built_once = true;
         for (ent, ..) in &marks {
             commands.entity(ent).despawn();
@@ -444,8 +451,12 @@ fn update_marks(
             let base = if ed.class == RoadClass::Arterial { W_ARTERIAL } else { W_LOCAL };
             let half = if classes.0.contains_key(&e) { c.width().max(W_LOCAL) } else { base } / 2.0;
             let (a, b) = cp.plan.graph.pos(e);
-            let junction = [deg[ed.a as usize].len() >= 3, deg[ed.b as usize].len() >= 3];
-            for m in edge_marks(e, a.distance(b), half, c, junction, hand.0) {
+            // cut lines at the junction box (or the roundabout ring) of real junctions only
+            let trim = [(ed.a, a), (ed.b, b)].map(|(n, p)| match deg[n as usize].len() >= 3 {
+                false => 0.0,
+                true => j.rings.get(&pkey(p)).map_or(half.max(1.0) + 0.6, |r| r.r + 1.2),
+            });
+            for m in edge_marks(e, a.distance(b), half, c, trim, hand.0) {
                 let mat = if m.yellow { assets.2.clone() } else { assets.1.clone() };
                 let shown = s.built.get(e).copied().unwrap_or(false);
                 commands.spawn((m, Mesh3d(assets.0.clone()), MeshMaterial3d(mat), mark_transform(&m, a, b, w), if shown { Visibility::Inherited } else { Visibility::Hidden }));
@@ -463,7 +474,9 @@ fn update_marks(
     for (_, m, mut tf, mut v) in &mut marks {
         let (a, b) = cp.plan.graph.pos(m.edge);
         *tf = mark_transform(m, a, b, w);
-        let want = if s.built.get(m.edge).copied().unwrap_or(false) { Visibility::Inherited } else { Visibility::Hidden };
+        // zoomed out, dashes and stop bars merge into white blocks: drop them, keep the long lines
+        let small = m.fat > 1.0 || m.q.x - m.p.x <= DASH + 1e-3;
+        let want = if s.built.get(m.edge).copied().unwrap_or(false) && !(small && w > 0.4) { Visibility::Inherited } else { Visibility::Hidden };
         if *v != want {
             *v = want;
         }
@@ -752,14 +765,14 @@ mod tests {
     fn us_markings_by_class_and_side() {
         use city::lanes::LaneClass::*;
         let yellow = |v: &[RoadMark]| v.iter().filter(|m| m.yellow).count();
-        let minor = edge_marks(0, 30.0, 0.9, TwoLaneLow, [false; 2], false);
+        let minor = edge_marks(0, 30.0, 0.9, TwoLaneLow, [0.0; 2], false);
         assert!(yellow(&minor) > 3 && minor.iter().filter(|m| m.yellow).all(|m| m.q.x - m.p.x <= DASH + 1e-4), "dashed yellow centre");
-        let big = edge_marks(0, 30.0, 1.8, FourLane, [false; 2], false);
+        let big = edge_marks(0, 30.0, 1.8, FourLane, [0.0; 2], false);
         assert_eq!(big.iter().filter(|m| m.yellow && m.q.x - m.p.x == 30.0).count(), 2, "double solid yellow");
         assert!(big.iter().any(|m| !m.yellow && m.p.y.abs() == 0.9 && m.q.x - m.p.x <= DASH + 1e-4), "dashed white lane line");
         assert_eq!(big.iter().filter(|m| !m.yellow && m.p.y.abs() > 1.6 && m.q.x - m.p.x == 30.0).count(), 2, "solid white edges");
-        assert_eq!(yellow(&edge_marks(0, 30.0, 0.5, Street, [false; 2], false)), 0);
-        let bar = |left| edge_marks(0, 30.0, 0.9, TwoLaneLow, [false, true], left).into_iter().find(|m| m.fat > 1.0).unwrap();
+        assert_eq!(yellow(&edge_marks(0, 30.0, 0.5, Street, [0.0; 2], false)), 0);
+        let bar = |left| edge_marks(0, 30.0, 0.9, TwoLaneLow, [0.0, 2.0], left).into_iter().find(|m| m.fat > 1.0).unwrap();
         let (r, l) = (bar(false), bar(true));
         assert!(r.q.y > 0.0 && l.q.y < 0.0 && r.yellow == l.yellow, "stop bar mirrors with the driving side");
     }
