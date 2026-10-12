@@ -2,7 +2,7 @@
 //! white stations with dark outlines, thick coloured octilinear lines, capsule trains.
 use crate::camera::MapCam;
 use crate::zones::{CityPlan, GrowthLink, ZoneLayout};
-use city::placer::{crossing_upgrade_cost, place_track, Ctx, Placement, DEFAULT_RADIUS, RADII, RAIL_COST_PER_LEN};
+use city::placer::{merge_crossings, road_crossings, LEVEL_VCAP, crossing_upgrade_cost, place_track, Ctx, Placement, DEFAULT_RADIUS, RADII, RAIL_COST_PER_LEN};
 use bevy::prelude::*;
 use economy::{Category, CurrentBudget, Economy, SpendCommand, SpendQueue};
 use sim_core::AgencyId;
@@ -174,6 +174,54 @@ pub fn road_upgrade(ctx: &Ctx, classes: &RoadClasses, e: usize) -> Option<city::
     city::lanes::upgrade(ctx.plan, ctx.pop, ctx.gone, &strip, ed.len, from)
 }
 
+/// A road built (by city growth) across track that is already laid needs a crossing too. Re-find the crossings of every
+/// laid hop when the set of built roads changes and add the ones that are missing (existing kinds are kept).
+fn reconcile_crossings(
+    link: Res<GrowthLink>,
+    cp: Res<CityPlan>,
+    lines: Res<Lines>,
+    geoms: Res<RailGeoms>,
+    map: Res<StationMap>,
+    net: Res<TransitNet>,
+    mut transit: ResMut<TransitCommands>,
+    mut seen: Local<usize>,
+) {
+    let built = &link.snapshots.latest().built;
+    let n = built.iter().filter(|b| **b).count();
+    if n == *seen {
+        return;
+    }
+    *seen = n;
+    let mut done: Vec<(IVec2, IVec2)> = vec![];
+    for l in &lines.all {
+        for w in l.cells.windows(2) {
+            let key = hop_key(w[0], w[1]);
+            if done.contains(&key) {
+                continue;
+            }
+            done.push(key);
+            let Some((na, nb)) = map.node(key.0).zip(map.node(key.1)) else { continue };
+            let Some(i) = net.0.rail_edge(na, nb) else { continue };
+            let e = &net.0.edges[i];
+            let pts = match geoms.0.get(&key) {
+                Some(g) if g.len() >= 2 => g.clone(),
+                _ => route(&[key.0, key.1]),
+            };
+            let mut found = road_crossings(&cp.plan, built, &pts);
+            if e.a != na {
+                // geometry runs key.0 -> key.1, the edge from its own `a`
+                for c in &mut found {
+                    c.at = e.len - c.at;
+                }
+            }
+            if let Some(all) = merge_crossings(&e.crossings, &found) {
+                let vcap = if all.iter().any(|c| c.kind == CrossingKind::Level) { e.vcap.min(LEVEL_VCAP) } else { e.vcap };
+                transit.0.push(TransitCommand { agency: PLAYER, action: TransitAction::SetCurve { edge: i, len: e.len, vcap, crossings: all } });
+            }
+        }
+    }
+}
+
 /// Zones razed so far by eminent domain (indexed by zone).
 #[derive(Resource, Default)]
 pub struct Razed(pub Vec<bool>);
@@ -330,6 +378,7 @@ impl Plugin for ShellPlugin {
             .init_resource::<Lines>()
             .init_resource::<RailGeoms>()
             .init_resource::<RoadClasses>()
+            .add_systems(Update, reconcile_crossings)
             .init_resource::<Razed>()
             .insert_resource(ActiveAgency(PLAYER))
             .add_systems(Update, apply_tool_commands);
@@ -699,5 +748,27 @@ mod tests {
         assert!(road_upgrade(&ctx, &classes, 0).unwrap().to > first.to, "next click goes one class further");
         classes.0.insert(0, city::lanes::LaneClass::TenLane);
         assert!(road_upgrade(&ctx, &classes, 0).is_none());
+    }
+
+    #[test]
+    fn a_road_built_after_the_track_still_gets_a_crossing() {
+        let plan = city::plan_towns(7, &world_gen::generate_cities(7, 3)[..2]);
+        // a track straight across the middle of some road edge
+        let e = 0;
+        let (p, q) = plan.graph.pos(e);
+        let mid = (p + q) / 2.0;
+        let d = (q - p).normalize();
+        let n = Vec2::new(-d.y, d.x);
+        let pts = [mid - n * 20.0, mid + n * 20.0];
+        let none = vec![false; plan.graph.edges.len()];
+        let mut built = none.clone();
+        assert!(road_crossings(&plan, &none, &pts).is_empty(), "no road yet, no crossing");
+        built[e] = true;
+        let found = road_crossings(&plan, &built, &pts);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].road, e as u32);
+        // laid track (no crossings) gains it; a second pass adds nothing
+        let all = merge_crossings(&[], &found).unwrap();
+        assert!(merge_crossings(&all, &found).is_none());
     }
 }

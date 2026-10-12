@@ -180,20 +180,18 @@ fn seg_hit(p: Vec2, q: Vec2, r: Vec2, s: Vec2) -> Option<f32> {
 
 /// Place a track a -> b bending around `waypoint` with arc radius `radius`, and price it. None if it crosses too
 /// much water for one bridge.
-pub fn place_via(ctx: &Ctx, a: Vec2, b: Vec2, waypoint: Vec2, radius: f32) -> Option<Placement> {
-    let (pts, r_eff) = arc_path(a, waypoint, b, radius);
+/// Level/bridge crossings of every built road along the polyline `pts` (distance from its start). The one place that
+/// decides where track meets road: the placer uses it for new track, and the app re-runs it when a road is built
+/// across track that is already laid.
+pub fn road_crossings(plan: &TownPlan, built: &[bool], pts: &[Vec2]) -> Vec<Crossing> {
     let mut cum = vec![0.0f32];
     for w in pts.windows(2) {
         cum.push(cum.last().unwrap() + w[0].distance(w[1]));
     }
-    let len = *cum.last().unwrap();
-    // roads: every built street the track cuts, once per ~2 units of track
     let (lo, hi) = (pts.iter().fold(Vec2::MAX, |m, p| m.min(*p)) - Vec2::splat(1.0), pts.iter().fold(Vec2::MIN, |m, p| m.max(*p)) + Vec2::splat(1.0));
-    let mut crossings: Vec<Crossing> = vec![];
-    let mut costs = vec![];
     let mut hits: Vec<(f32, usize)> = vec![];
-    for (e, ed) in ctx.plan.graph.edges.iter().enumerate().filter(|(e, _)| ctx.built.get(*e).copied().unwrap_or(false)) {
-        let (p, q) = ctx.plan.graph.pos(e);
+    for (e, _) in plan.graph.edges.iter().enumerate().filter(|(e, _)| built.get(*e).copied().unwrap_or(false)) {
+        let (p, q) = plan.graph.pos(e);
         if p.max(q).cmplt(lo).any() || p.min(q).cmpgt(hi).any() {
             continue;
         }
@@ -202,19 +200,42 @@ pub fn place_via(ctx: &Ctx, a: Vec2, b: Vec2, waypoint: Vec2, radius: f32) -> Op
                 hits.push((cum[i] + t * w[0].distance(w[1]), e));
             }
         }
-        let _ = ed;
     }
     hits.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-    let mut last = f32::NEG_INFINITY;
+    let (mut last, mut out) = (f32::NEG_INFINITY, vec![]);
     for (at, e) in hits {
         if at - last < 2.0 {
             continue;
         }
         last = at;
-        let kind = if level_allowed(ctx.plan.graph.edges[e].class) { CrossingKind::Level } else { CrossingKind::Bridge };
-        crossings.push(Crossing { kind, at: at as f64, road: e as u32 });
-        costs.push(crossing_cost(kind, None));
+        let kind = if level_allowed(plan.graph.edges[e].class) { CrossingKind::Level } else { CrossingKind::Bridge };
+        out.push(Crossing { kind, at: at as f64, road: e as u32 });
     }
+    out
+}
+
+/// Merge freshly found road crossings into an edge's existing ones: keep what is there (an upgraded bridge stays a
+/// bridge), add the roads that are new. None when nothing was added.
+pub fn merge_crossings(old: &[Crossing], found: &[Crossing]) -> Option<Vec<Crossing>> {
+    let new: Vec<Crossing> = found.iter().filter(|c| !old.iter().any(|o| o.road == c.road)).copied().collect();
+    if new.is_empty() {
+        return None;
+    }
+    let mut all: Vec<Crossing> = old.iter().copied().chain(new).collect();
+    all.sort_by(|x, y| x.at.total_cmp(&y.at));
+    Some(all)
+}
+
+pub fn place_via(ctx: &Ctx, a: Vec2, b: Vec2, waypoint: Vec2, radius: f32) -> Option<Placement> {
+    let (pts, r_eff) = arc_path(a, waypoint, b, radius);
+    let mut cum = vec![0.0f32];
+    for w in pts.windows(2) {
+        cum.push(cum.last().unwrap() + w[0].distance(w[1]));
+    }
+    let len = *cum.last().unwrap();
+    // roads: every built street the track cuts, once per ~2 units of track
+    let mut crossings = road_crossings(ctx.plan, ctx.built, &pts);
+    let mut costs: Vec<f64> = crossings.iter().map(|c| crossing_cost(c.kind, None)).collect();
     // water: a bridge over each stretch of water, priced by span
     let samples = resample(&pts, SAMPLE);
     let mut run: Option<usize> = None;
