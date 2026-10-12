@@ -10,6 +10,7 @@ sim_core = { path = "../sim_core" }
 world_gen = { path = "../world_gen" }
 transit = { path = "../transit" }
 growth = { path = "../growth" }
+city = { path = "../city" }
 economy = { path = "../economy" }
 render_budget = { path = "../render_budget" }
 save = { path = "../save" }

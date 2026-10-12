@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 mod camera;
 mod layout;
+mod roads;
 mod stations;
 mod capture;
 mod hud;
@@ -15,7 +16,7 @@ mod zones;
 pub use camera::{MapCam, MapCameraPlugin};
 pub use shell::{to_transit, ShellPlugin, StationMap};
 pub use terrain::{chunk_triangles, ground_y, wanted_chunks, TerrainPlugin};
-pub use zones::{build_layout, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneKind, ZoneLayout, ZonesPlugin};
+pub use zones::{build_layout, CityPlan, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneKind, ZoneLayout, ZonesPlugin};
 
 /// Every macrometro feature plugin, in dependency order, then the shell that ties them together.
 pub struct MacrometroPlugins;
@@ -35,6 +36,7 @@ impl PluginGroup for MacrometroPlugins {
             .add(TerrainPlugin)
             .add(MapCameraPlugin)
             .add(ZonesPlugin)
+            .add(roads::RoadsPlugin)
             .add(ShellPlugin)
             .add(stations::StationsPlugin)
             .add(sound::SoundPlugin)

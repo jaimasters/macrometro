@@ -4,6 +4,7 @@
 - docs/arch/multi-city.md — Many cities in one logical world, linked by inter-city edges; each city is a save-able region.
 - docs/arch/growth-drivers.md — How transit utilisation, accessibility and congestion drive zone growth and sprawl.
 - docs/arch/land-acquisition.md — Eminent domain vs greenfield cost model rewarding foresight.
+- docs/arch/city-gen.md — Procedural towns: terrain-cost arterials, tensor-field streets, access-gated growth, traffic and mode choice.
 - docs/arch/parallelism.md — Independent sim systems and their parallel schedule.
 - docs/arch/sim-render-decoupling.md — Fixed-step sim off the render thread; immutable snapshot handoff.
 - docs/arch/render-budget.md — Monitor-locked framerate; priority-ordered, deferrable render work; residual risks.
@@ -18,6 +19,7 @@
 - docs/features/save/ — Versioned world save format, loader, seeded scenario generator.
 - docs/features/ui_tools/ — Player tools: draw line, place station, line policies (macro), stop/segment edits (micro).
 - docs/features/sound/ — Procedural soundscape: SoundEvent -> quantised tones + ambient bed. Arch: sound.
+- docs/features/city/ — Town/road generation, road growth, traffic, mode choice. Arch: city-gen, growth-drivers.
 - docs/features/app/ — Composes plugins; binary + wasm entry.
 ## other
 - docs/game-loop.md — sandbox loop, failure, city reset, difficulty drift

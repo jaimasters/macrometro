@@ -14,8 +14,8 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | R7 | One-shot tools | Tool reverts after one use | Stage A / mgr-ui | Merged (not seen on screen) | 5d06f0e |
 | R8 | No grid; organic layout, slower growth | Organic towns, growth gated by transit | Stage A2 / mgr-ui | Merged (not seen on screen) | 356326d |
 | R9 | Station visuals, not shapes (platform bars) | Platform bars, crowding gauge, labels | Stage B / mgr-ui | Merged (not seen on screen) | bc1e7b0 |
-| R10 | Real town and road patterns, visible traffic | Researched road growth; zones need road access; car dots and congestion tint | A3 / mgr-city | In progress | |
-| R11 | Functional roads, mode choice | Car trips route on roads; mode choice by travel time replaces stub car share | A3 / mgr-city | In progress | |
+| R10 | Real town and road patterns, visible traffic | Researched road growth (docs/arch/city-gen.md); zones need road access; car dots (zoomed in) and congestion tint (zoomed out) | A3 / mgr-city | Built, awaiting merge (not seen on screen) | see A3 report |
+| R11 | Functional roads, mode choice | Car trips route on the generated road graph; logit mode choice on car vs transit minutes replaces stub CarShare/Scorecards | A3 / mgr-city | Built, awaiting merge (not seen on screen) | see A3 report |
 | R12 | Station click menu | Menu: info, extend, new line, +platform, delete | B2 / mgr-city | Requested | |
 | R13 | Zone legend ("what are green/orange/purple?") | Legend: green residential, orange commercial, purple industrial | B2 / mgr-city | Requested | |
 | R14 | Track counts; one track is one-way | 1 one-way, 2 bidirectional, 4 with overtaking | C1+C2 / mgr-city | Requested | |
