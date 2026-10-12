@@ -160,8 +160,9 @@ fn select_station(
         sel.0 = None;
     }
     if *tool == ActiveTool::Pan && mouse.just_pressed(MouseButton::Left) {
-        if let Some(c) = cursor.0.and_then(|p| station_at(&stations.0, p)) {
-            sel.0 = Some(c);
+        // click a station to select it (opens its menu); click empty map to dismiss
+        if let Some(p) = cursor.0 {
+            sel.0 = station_at(&stations.0, p);
         }
     }
     if sel.0.is_some_and(|c| !stations.0.contains(&c)) {

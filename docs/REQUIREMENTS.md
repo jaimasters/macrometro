@@ -14,10 +14,10 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | R7 | One-shot tools | Tool reverts after one use | Stage A / mgr-ui | Merged (not seen on screen) | 5d06f0e |
 | R8 | No grid; organic layout, slower growth | Organic towns, growth gated by transit | Stage A2 / mgr-ui | Merged (not seen on screen) | 356326d |
 | R9 | Station visuals, not shapes (platform bars) | Platform bars, crowding gauge, labels | Stage B / mgr-ui | Merged (not seen on screen) | bc1e7b0 |
-| R10 | Real town and road patterns, visible traffic | Researched road growth (docs/arch/city-gen.md); zones need road access; car dots (zoomed in) and congestion tint (zoomed out) | A3 / mgr-city | Merged (not seen on screen) | see A3 report |
-| R11 | Functional roads, mode choice | Car trips route on the generated road graph; logit mode choice on car vs transit minutes replaces stub CarShare/Scorecards | A3 / mgr-city | Merged (not seen on screen) | see A3 report |
-| R12 | Station click menu | Menu: info, extend, new line, +platform, delete | B2 / mgr-city | Requested | |
-| R13 | Zone legend ("what are green/orange/purple?") | Legend: green residential, orange commercial, purple industrial | B2 / mgr-city | Requested | |
+| R10 | Real town and road patterns, visible traffic | Researched road growth (docs/arch/city-gen.md); zones need road access; car dots (zoomed in) and congestion tint (zoomed out) | A3 / mgr-city | Built, awaiting merge (not seen on screen) | see A3 report |
+| R11 | Functional roads, mode choice | Car trips route on the generated road graph; logit mode choice on car vs transit minutes replaces stub CarShare/Scorecards | A3 / mgr-city | Built, awaiting merge (not seen on screen) | see A3 report |
+| R12 | Station click menu | Menu: info (name, waiting, lines, platforms), extend line from terminus, new line, +platform, delete; palette tools stay as shortcuts | B2 / mgr-city | Merged (not seen on screen) | d2b122a |
+| R13 | Zone legend ("what are green/orange/purple?") | Top-left legend chip: green residential, orange commercial, purple industrial | B2 / mgr-city | Merged (not seen on screen) | d2b122a |
 | R14 | Track counts; one track is one-way | 1 one-way, 2 bidirectional, 4 with overtaking | C1+C2 / mgr-city | Requested | |
 | R15 | Platform counts with holding | Platforms gate trains into stations | C1+C2 / mgr-city | Requested | |
 | R16 | Kinematics | Accel, braking, headway spacing | C1+C2 / mgr-city | Requested | |

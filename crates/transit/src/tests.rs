@@ -206,3 +206,32 @@ fn remove_node_drops_segments_bridges_and_prunes_short_lines() {
     assert!(net.lines.is_empty(), "line below 2 stops is removed");
     assert_eq!(net.apply(&cmd(AG, TransitAction::RemoveNode(NodeId(99)))), Err(TransitError::UnknownNode(NodeId(99))));
 }
+
+#[test]
+fn extend_line_at_either_terminus_only_over_a_rail_edge() {
+    let mut net = corridor(4, 10.0, RailClass::LightRail, 0.0, false);
+    net.apply(&cmd(AG, TransitAction::AddLine { class: RailClass::LightRail, stops: vec![NodeId(1), NodeId(2)], alignment_mismatch: 0.0 })).unwrap();
+    let id = net.lines[0].id;
+    let ext = |from: u32, to: u32| cmd(AG, TransitAction::ExtendLine { line: id, from: NodeId(from), to: NodeId(to) });
+    net.apply(&ext(2, 3)).unwrap();
+    net.apply(&ext(1, 0)).unwrap();
+    assert_eq!(net.lines[0].stops, vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)]);
+    assert_eq!(net.lines[0].segments.len(), 3);
+    assert_eq!(net.apply(&ext(1, 2)), Err(TransitError::NotTerminus(NodeId(1))));
+    assert_eq!(net.apply(&ext(3, 3)), Err(TransitError::NoRailEdge(NodeId(3), NodeId(3))));
+    assert_eq!(net.apply(&cmd(OTHER, TransitAction::ExtendLine { line: id, from: NodeId(3), to: NodeId(2) })), Err(TransitError::NotOwner));
+    assert_eq!(net.apply(&cmd(AG, TransitAction::ExtendLine { line: LineId(9), from: NodeId(0), to: NodeId(1) })), Err(TransitError::UnknownLine(LineId(9))));
+}
+
+#[test]
+fn platforms_start_at_one_and_cap() {
+    let mut net = corridor(2, 10.0, RailClass::LightRail, 0.0, false);
+    assert_eq!(net.platform_count(NodeId(1)), 1);
+    for want in 2..=MAX_PLATFORMS {
+        net.apply(&cmd(AG, TransitAction::AddPlatform(NodeId(1)))).unwrap();
+        assert_eq!(net.platform_count(NodeId(1)), want);
+    }
+    assert_eq!(net.apply(&cmd(AG, TransitAction::AddPlatform(NodeId(1)))), Err(TransitError::MaxPlatforms(NodeId(1))));
+    assert_eq!(net.platform_count(NodeId(0)), 1);
+    assert_eq!(net.apply(&cmd(AG, TransitAction::AddPlatform(NodeId(7)))), Err(TransitError::UnknownNode(NodeId(7))));
+}
