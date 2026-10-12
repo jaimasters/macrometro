@@ -29,6 +29,8 @@ enum MenuAction {
     Extend(usize),
     NewLine,
     Platform,
+    /// Buy a siding for spare trains here.
+    Siding,
     /// +1 track on the segment to the neighbouring station on this cell.
     Track(IVec2),
     /// Next curve radius up on the segment to this neighbour.
@@ -91,6 +93,7 @@ pub enum MenuActionKind {
     Extend(usize),
     NewLine,
     Platform,
+    Siding,
     Track(IVec2),
     Curve(IVec2),
     Crossings(IVec2),
@@ -103,6 +106,7 @@ impl From<MenuActionKind> for MenuAction {
             MenuActionKind::Extend(l) => MenuAction::Extend(l),
             MenuActionKind::NewLine => MenuAction::NewLine,
             MenuActionKind::Platform => MenuAction::Platform,
+            MenuActionKind::Siding => MenuAction::Siding,
             MenuActionKind::Track(n) => MenuAction::Track(n),
             MenuActionKind::Curve(n) => MenuAction::Curve(n),
             MenuActionKind::Crossings(n) => MenuAction::Crossings(n),
@@ -135,6 +139,7 @@ fn rebuild_menu(
     link: Res<GrowthLink>,
     razed: Res<Razed>,
     geoms: Res<RailGeoms>,
+    trains: Res<crate::rails::Trains>,
     old: Query<Entity, With<MenuRoot>>,
     mut commands: Commands,
 ) {
@@ -194,6 +199,9 @@ fn rebuild_menu(
             let land = |p: Vec2| city::is_land(seed.0, p);
             let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &gone, land: &land };
             let mut upgrades: Vec<(MenuActionKind, String)> = vec![];
+            if map.node(cell).is_some_and(|n| !trains.0.sidings.contains_key(&n.0)) {
+                upgrades.push((MenuActionKind::Siding, format!("+ Siding  ({:.0}, stores {} trains)", crate::shell::SIDING_COST, transit::trains::SIDING_CAPACITY)));
+            }
             for n in neighbours(&lines, cell) {
                 let to = station_name(seed.0, &layout.0, n.as_vec2());
                 if let Some(u) = curve_upgrade(&ctx, &geoms, &net.0, &map, cell, n) {
@@ -290,6 +298,9 @@ fn menu_clicks(
         }
         MenuAction::Track(other) => {
             out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeTracks { a: cell, b: other } });
+        }
+        MenuAction::Siding => {
+            out.write(ToolCommand { agency: agency.0, action: ToolAction::AddSiding { cell } });
         }
         MenuAction::Curve(other) => {
             out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeCurve { a: cell, b: other } });

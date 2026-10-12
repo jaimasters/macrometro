@@ -29,6 +29,8 @@ pub enum ToolAction {
     /// One more track on the rail segment between two stations (1 -> 2 -> 4).
     UpgradeTracks { a: IVec2, b: IVec2 },
     /// Re-lay the segment between two stations on the next larger curve radius (faster; razes what the arc sweeps).
+    /// Buy a siding (depot) at the station on `cell`: stores spare trains.
+    AddSiding { cell: IVec2 },
     /// Buy one more train for app line `line` (R37).
     AddTrain { line: usize },
     /// Widen a city road to the next lane class (R24).

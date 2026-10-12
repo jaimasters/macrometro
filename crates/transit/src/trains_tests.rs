@@ -327,6 +327,9 @@ fn bought_trains_join_the_line_up_to_the_cap() {
     let net = line_net(2, 150.0, 2, RailClass::LightRail);
     let base = run(&net, 900.0).trains.len();
     let mut s = TrainSim::default();
+    s.step(&net); // routes exist
+    assert!(!s.add_train(LineId(0)), "no siding, no train");
+    assert!(s.add_siding(NodeId(0)) && !s.add_siding(NodeId(0)) && s.add_siding(NodeId(1)));
     let mut bought = 0;
     while s.add_train(LineId(0)) {
         bought += 1;

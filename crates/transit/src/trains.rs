@@ -21,6 +21,8 @@ pub const HEADWAY: f64 = 40.0;
 const MAX_TRAINS: usize = 8;
 /// Most trains the player can add to a line on top of the scheduled fleet (R37).
 pub const MAX_EXTRA_TRAINS: usize = 4;
+/// Spare trains one siding stores.
+pub const SIDING_CAPACITY: usize = 2;
 /// Passengers a train carries at most, share of the load that gets off at each stop, and the cap on a station queue.
 pub const TRAIN_CAPACITY: f64 = 60.0;
 const ALIGHT: f64 = 0.4;
@@ -161,6 +163,8 @@ pub struct TrainSim {
     pub arrivals: BTreeMap<u32, f64>,
     /// Trains the player bought per line (on top of the scheduled fleet).
     pub extra: BTreeMap<u32, usize>,
+    /// Sidings (depots) bought per station node: how many spare trains each stores.
+    pub sidings: BTreeMap<u32, usize>,
 }
 
 impl TrainSim {
@@ -492,8 +496,24 @@ impl TrainSim {
         net.edges[self.edge_under(t)].tracks
     }
 
-    /// Buy one more train for `line`; false at the cap.
+    /// Spare-train slots free in sidings at the stations of `line`.
+    pub fn siding_free(&self, line: LineId) -> usize {
+        let Some(r) = self.routes.iter().find(|r| r.line == line) else { return 0 };
+        let mut seen: Vec<NodeId> = vec![];
+        let cap: usize = r.stops.iter().filter(|n| { let new = !seen.contains(n); seen.push(**n); new }).map(|n| self.sidings.get(&n.0).copied().unwrap_or(0)).sum();
+        cap.saturating_sub(self.extra.get(&line.0).copied().unwrap_or(0))
+    }
+
+    /// Buy a siding at a station (one per station); false if it already has one.
+    pub fn add_siding(&mut self, n: NodeId) -> bool {
+        self.sidings.insert(n.0, SIDING_CAPACITY).is_none()
+    }
+
+    /// Buy one more train for `line`: needs free space in a siding on the line; false otherwise or at the cap.
     pub fn add_train(&mut self, line: LineId) -> bool {
+        if self.siding_free(line) == 0 {
+            return false;
+        }
         let e = self.extra.entry(line.0).or_default();
         if *e >= MAX_EXTRA_TRAINS {
             return false;

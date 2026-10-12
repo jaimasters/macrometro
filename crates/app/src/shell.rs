@@ -17,6 +17,7 @@ const STATION_COST: f64 = 50.0;
 /// Price of one extra platform (B2 station menu; C1 trains need platforms to enter).
 /// Price of one more train on a line.
 pub const TRAIN_COST: f64 = 60.0;
+pub const SIDING_COST: f64 = 50.0;
 pub const PLATFORM_COST: f64 = 40.0;
 
 // Flat layer stack (world y): land 0 < ghosts 0.5 < zones 1 < lines 2 < preview 2.6 < station outline 3 < station 3.3 < train 4.5.
@@ -293,7 +294,7 @@ pub fn to_transit_with(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]
             }
         }
         // upgrades that need the live net/city are applied in `apply_tool_commands`
-        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } | ToolAction::UpgradeRoad { .. } | ToolAction::AddTrain { .. } => {}
+        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } | ToolAction::UpgradeRoad { .. } | ToolAction::AddTrain { .. } | ToolAction::AddSiding { .. } => {}
         ToolAction::AddPlatform { .. } => {
             if let Some(n) = known {
                 out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
@@ -430,6 +431,14 @@ fn apply_tool_commands(
     let pan = |p: Vec2| cam.as_ref().map_or(0.0, |c| ((p.x - c.focus.x) / c.view_h).clamp(-1.0, 1.0));
     for c in cmds.read() {
         match &c.action {
+            ToolAction::AddSiding { cell } => {
+                if let Some(n) = map.node(*cell) {
+                    if trains.0.add_siding(n) {
+                        spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount: SIDING_COST });
+                    }
+                }
+                continue;
+            }
             ToolAction::AddTrain { line } => {
                 if trains.0.add_train(transit::LineId(*line as u32)) {
                     spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount: TRAIN_COST });
