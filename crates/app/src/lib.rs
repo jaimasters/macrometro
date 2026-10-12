@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use std::sync::Arc;
 
 mod camera;
+mod layout;
 mod capture;
 mod hud;
 pub mod shell;
@@ -13,7 +14,7 @@ mod zones;
 pub use camera::{MapCam, MapCameraPlugin};
 pub use shell::{to_transit, ShellPlugin, StationMap};
 pub use terrain::{chunk_triangles, ground_y, wanted_chunks, TerrainPlugin};
-pub use zones::{build_zones, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneKind, ZoneLayout, ZonesPlugin};
+pub use zones::{build_layout, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneKind, ZoneLayout, ZonesPlugin};
 
 /// Every macrometro feature plugin, in dependency order, then the shell that ties them together.
 pub struct MacrometroPlugins;
@@ -50,8 +51,7 @@ impl Plugin for ShellSetup {
         if let Some(c) = app.world().get_resource::<world_gen::Cities>().and_then(|c| c.0.first()) {
             let (ox, oz) = c.center.origin_cell();
             let half = world_gen::CHUNK_SIZE as f32 / 2.0;
-            let extent = (2 * c.radius + 1) as f32 * world_gen::CHUNK_SIZE as f32;
-            app.insert_resource(MapCam::framing(Vec2::new(ox as f32 + half, oz as f32 + half), extent));
+            app.insert_resource(MapCam::framing(Vec2::new(ox as f32 + half, oz as f32 + half), 190.0));
         }
     }
 }

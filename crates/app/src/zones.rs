@@ -4,71 +4,29 @@ use growth::{CostMatrix, GrowthParams, GrowthSim, RoadAgency, RoadPlan as ZonePl
 use sim_core::{AgencyCommand, Handoff, Sim, Simulation};
 use std::sync::{Arc, Mutex};
 use transit::{EdgeKind, NodeId, TransitAction, TransitCommand};
-use world_gen::{CityRegion, CHUNK_SIZE};
 
-/// Layer height of zone glyphs (flat 2D stack: land 0 < ghosts < zones < lines < stations < trains).
+/// Layer heights (flat 2D stack: land 0 < roads .3 < ghosts .5 < zones 1 < lines 2 < stations 3 < trains 4.5).
 pub const Y_ZONE: f32 = 1.0;
+pub const Y_ROAD: f32 = 0.3;
 
-/// Peak zone capacity (residents) at a city centre; falls off to the region edge.
-const PEAK_CAPACITY: f64 = 2000.0;
+/// Growth cadence: ONE tunable constant. Per-tick fractional growth cap at full transit service (10 ticks/s).
+/// 0.0015 => a new ring of zones fills in roughly every 1-2 minutes; a fresh town stays readable ~5 minutes.
+pub const GROWTH_RATE: f64 = 0.0015;
+/// Fraction of GROWTH_RATE a zone gets with no transit service at all; transit share lifts it to 1.0.
+const CAR_ONLY_GROWTH: f64 = 0.4;
+/// A zone with at least this population counts as built (drawn, and its children may start growing).
+pub const BUILT_POP: f64 = 30.0;
 
-/// Land-use type; drives glyph shape and colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZoneKind {
-    Residential,
-    Commercial,
-    Industrial,
-}
+pub use crate::layout::{build_layout, road_pairs, ZoneGeo, ZoneKind};
 
-impl ZoneKind {
-    pub fn colour(self) -> Color {
-        match self {
-            ZoneKind::Residential => Color::srgb(0.52, 0.74, 0.58),
-            ZoneKind::Commercial => Color::srgb(0.95, 0.62, 0.28),
-            ZoneKind::Industrial => Color::srgb(0.60, 0.54, 0.76),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ZoneGeo {
-    pub center: Vec2,
-    pub city: u32,
-    pub kind: ZoneKind,
-}
-
-/// One zone per city chunk, ids ascending. Returns zones, geometry and 4-neighbour index pairs.
-pub fn build_zones(cities: &[CityRegion]) -> (Zones, Vec<ZoneGeo>, Vec<(usize, usize)>) {
-    let (mut zones, mut geo, mut pairs) = (vec![], vec![], vec![]);
-    for c in cities {
-        let (r, base) = (c.radius as i64, zones.len());
-        let w = 2 * r + 1;
-        for (k, ch) in c.chunks().enumerate() {
-            let (dx, dz) = ((ch.x - c.center.x).abs(), (ch.z - c.center.z).abs());
-            let capacity = PEAK_CAPACITY * (1.0 - dx.max(dz) as f64 / (r + 1) as f64);
-            let (ox, oz) = ch.origin_cell();
-            let half = CHUNK_SIZE as f32 / 2.0;
-            let pop = capacity * 0.05;
-            zones.push(Zone { id: ZoneId(zones.len() as u32), pop, jobs: pop * 0.4, capacity, crowding: 0.0 });
-            let ring = dx.max(dz);
-            let kind = if ring == 0 {
-                ZoneKind::Commercial
-            } else if ring == r && (ch.x + ch.z) % 2 == 0 {
-                ZoneKind::Industrial
-            } else {
-                ZoneKind::Residential
-            };
-            geo.push(ZoneGeo { center: Vec2::new(ox as f32 + half, oz as f32 + half), city: c.id.0, kind });
-            let (i, j) = (k as i64 % w, k as i64 / w);
-            if i < w - 1 {
-                pairs.push((base + k, base + k + 1));
-            }
-            if j < w - 1 {
-                pairs.push((base + k, base + k + w as usize));
-            }
-        }
-    }
-    (Zones::new(zones), geo, pairs)
+/// Growth zones (ascending id) from a layout; non-core zones start unbuilt.
+pub fn zones_from(geo: &[ZoneGeo]) -> Zones {
+    Zones::new(
+        geo.iter()
+            .enumerate()
+            .map(|(i, g)| Zone { id: ZoneId(i as u32), pop: g.start_pop, jobs: g.start_pop * 0.4, capacity: g.capacity, crowding: 0.0 })
+            .collect(),
+    )
 }
 
 /// Startup transit commands: one node per zone (NodeId(i) == zone i), road edges between neighbours.
@@ -103,6 +61,7 @@ pub struct GrowthSnapshot {
 }
 
 pub struct GrowthSimulation {
+    parents: Vec<Option<usize>>,
     sim: GrowthSim,
     agency: RoadAgency,
     shared: Arc<Shared>,
@@ -110,8 +69,9 @@ pub struct GrowthSimulation {
 }
 
 impl GrowthSimulation {
-    pub fn new(zones: Zones, shared: Arc<Shared>) -> Self {
-        Self { sim: GrowthSim::new(zones, GrowthParams::default()), agency: RoadAgency::default(), shared, road_reserve: 0.0 }
+    pub fn new(zones: Zones, parents: Vec<Option<usize>>, shared: Arc<Shared>) -> Self {
+        let params = GrowthParams { rate: GROWTH_RATE, seed_pop: 10.0, ..GrowthParams::default() };
+        Self { parents, sim: GrowthSim::new(zones, params), agency: RoadAgency::default(), shared, road_reserve: 0.0 }
     }
 }
 
@@ -121,10 +81,22 @@ impl Simulation for GrowthSimulation {
     fn apply(&mut self, _cmd: &AgencyCommand) {}
     fn step(&mut self, tick: u64) {
         let n = self.sim.zones.0.len();
+        let shares = self.shared.shares.lock().unwrap();
+        // Transit service gates the pace: no service => CAR_ONLY_GROWTH of the rate, full service => all of it.
+        let mean_share = if shares.is_empty() { 0.0 } else { shares.iter().sum::<f64>() / shares.len() as f64 };
+        self.sim.params.rate = GROWTH_RATE * (CAR_ONLY_GROWTH + (1.0 - CAR_ONLY_GROWTH) * mean_share.clamp(0.0, 1.0));
+        let before: Vec<(f64, f64)> = self.sim.zones.0.iter().map(|z| (z.pop, z.jobs)).collect();
         if let Some(c) = self.shared.costs.lock().unwrap().as_ref().filter(|c| c.n == n) {
             self.sim.step(c);
         }
-        let shares = self.shared.shares.lock().unwrap();
+        // Growth spreads outward: a zone cannot grow until the zone it hangs off is built.
+        for i in 0..n {
+            if let Some(p) = self.parents[i] {
+                if before[p].0 < BUILT_POP && before[i].0 < BUILT_POP {
+                    (self.sim.zones.0[i].pop, self.sim.zones.0[i].jobs) = before[i];
+                }
+            }
+        }
         // All-zero shares until transit publishes (mgr-transit): every zone then reads as underserved.
         let zeros = vec![0.0; n];
         let s: &[f64] = if shares.len() == n { &shares } else { &zeros };
@@ -165,36 +137,21 @@ struct WasmPump {
     clock: sim_core::FixedClock,
 }
 
-/// One flat glyph (a small building footprint) of a zone; `slot` orders them so density reveals them in turn.
+/// One building footprint per zone (flat, oriented along its road).
 #[derive(Component)]
 pub struct ZoneBlock(pub usize);
 
+/// Road stroke from a zone to its parent; shown once the zone is built.
 #[derive(Component)]
-pub struct Glyph {
-    pub slot: usize,
-    pub jitter: f32,
+pub struct ZoneRoad(pub usize);
+
+/// Footprint scale from fill: grows from 55% to 110% of the base size as the zone fills.
+pub fn footprint_scale(pop: f32, capacity: f64) -> f32 {
+    0.55 + 0.55 * (pop / capacity.max(1.0) as f32).clamp(0.0, 1.0).sqrt()
 }
 
-/// Glyph slot offsets within a zone (3x3, centre first).
-const SLOTS: [(f32, f32); 9] =
-    [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0)];
-const SLOT_PITCH: f32 = 7.0;
-
-fn hash01(a: u64, b: u64) -> f32 {
-    let mut h = a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    h ^= h >> 29;
-    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    ((h >> 40) as f32) / (1u64 << 24) as f32
-}
-
-/// How many glyphs a zone shows, from its population (density); `jitter` varies neighbours by one.
-pub fn glyph_count(pop: f32, jitter: f32) -> usize {
-    let d = (pop / PEAK_CAPACITY as f32 * 3.0).clamp(0.0, 1.0).sqrt();
-    ((1.0 + 8.0 * d + jitter * 1.5).floor() as usize).clamp(1, 9)
-}
-
-pub fn glyph_size(pop: f32, jitter: f32) -> f32 {
-    4.0 + 3.5 * (pop / PEAK_CAPACITY as f32 * 3.0).clamp(0.0, 1.0).sqrt() * (0.6 + 0.8 * jitter)
+pub fn is_built(pop: f32) -> bool {
+    pop as f64 >= BUILT_POP
 }
 
 /// Segment drawn for a zone's planned road: from the zone centre to its nearest other zone.
@@ -213,9 +170,12 @@ pub struct ZonesPlugin;
 impl Plugin for ZonesPlugin {
     fn build(&self, app: &mut App) {
         let cities = app.world().get_resource::<world_gen::Cities>().map(|c| c.0.clone()).unwrap_or_default();
-        let (zones, geo, pairs) = build_zones(&cities);
+        let seed = app.world().get_resource::<world_gen::WorldSeed>().map_or(0, |s| s.0);
+        let geo = build_layout(seed, &cities);
+        let pairs = road_pairs(&geo);
         let shared = Arc::new(Shared::default());
-        let (sim, _tx, snapshots) = Sim::new(GrowthSimulation::new(zones, shared.clone()));
+        let parents = geo.iter().map(|g| g.parent).collect();
+        let (sim, _tx, snapshots) = Sim::new(GrowthSimulation::new(zones_from(&geo), parents, shared.clone()));
         #[cfg(not(target_arch = "wasm32"))]
         app.insert_resource(SimGuard(sim_core::SimThread::spawn(sim, sim_core::SIM_HZ)));
         #[cfg(target_arch = "wasm32")]
@@ -243,40 +203,40 @@ fn pump_wasm(time: Res<Time>, mut p: NonSendMut<WasmPump>) {
 
 fn spawn_blocks(
     layout: Res<ZoneLayout>,
-    seed: Res<world_gen::WorldSeed>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Flat footprints seen from above: squares (residential), circles (commercial), diamonds (industrial).
-    let square = meshes.add(Cuboid::new(1.0, 0.3, 1.0));
-    let circle = meshes.add(Cylinder::new(0.5, 0.3));
-    let mut mat = |k: ZoneKind| mats.add(StandardMaterial { base_color: k.colour(), unlit: true, ..default() });
-    let mats3 = [(ZoneKind::Residential, mat(ZoneKind::Residential)), (ZoneKind::Commercial, mat(ZoneKind::Commercial)), (ZoneKind::Industrial, mat(ZoneKind::Industrial))];
+    let rect = meshes.add(Cuboid::new(1.0, 0.3, 1.0));
+    let round = meshes.add(Cylinder::new(0.5, 0.3));
+    let mut mat = |c: Color| mats.add(StandardMaterial { base_color: c, unlit: true, ..default() });
+    let kinds = [ZoneKind::Residential, ZoneKind::Commercial, ZoneKind::Industrial].map(|k| (k, mat(k.colour())));
+    let road_mat = mat(Color::srgb(0.80, 0.78, 0.72));
     for (i, g) in layout.0.iter().enumerate() {
-        let material = mats3.iter().find(|(k, _)| *k == g.kind).unwrap().1.clone();
-        let mesh = if g.kind == ZoneKind::Commercial { circle.clone() } else { square.clone() };
-        for (slot, (ox, oz)) in SLOTS.iter().enumerate() {
-            let jitter = hash01(i as u64, slot as u64);
-            let p = g.center + Vec2::new(*ox, *oz) * SLOT_PITCH;
-            if world_gen::height(seed.0, p.x as f64, p.y as f64) < world_gen::SEA_LEVEL {
-                continue; // no buildings on water
-            }
-            let rot = if g.kind == ZoneKind::Industrial { Quat::from_rotation_y(std::f32::consts::FRAC_PI_4) } else { Quat::IDENTITY };
+        let material = kinds.iter().find(|(k, _)| *k == g.kind).unwrap().1.clone();
+        // commercial = round plaza, industrial = long yard, residential = block (all oriented to the road)
+        let (mesh, size) = match g.kind {
+            ZoneKind::Commercial => (round.clone(), Vec2::splat(g.size.y + 1.0)),
+            ZoneKind::Industrial => (rect.clone(), Vec2::new(g.size.x * 1.3, g.size.y * 1.1)),
+            ZoneKind::Residential => (rect.clone(), g.size),
+        };
+        commands.spawn((
+            ZoneBlock(i),
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform {
+                translation: Vec3::new(g.center.x, Y_ZONE, g.center.y),
+                rotation: Quat::from_rotation_y(-g.angle),
+                scale: Vec3::new(size.x, 1.0, size.y),
+            },
+            Visibility::Hidden,
+        ));
+        if let Some(p) = g.parent {
             commands.spawn((
-                ZoneBlock(i),
-                Glyph { slot, jitter },
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform {
-                    translation: Vec3::new(
-                        g.center.x + ox * SLOT_PITCH + (jitter - 0.5) * 3.0,
-                        Y_ZONE,
-                        g.center.y + oz * SLOT_PITCH + (hash01(i as u64, slot as u64 + 50) - 0.5) * 3.0,
-                    ),
-                    rotation: rot,
-                    scale: Vec3::ONE,
-                },
+                ZoneRoad(i),
+                Mesh3d(rect.clone()),
+                MeshMaterial3d(road_mat.clone()),
+                ui_tools::segment_transform(layout.0[p].center, g.center, Y_ROAD, 1.6, 0.2),
                 Visibility::Hidden,
             ));
         }
@@ -295,21 +255,30 @@ fn sync_inputs(costs: Res<growth::Costs>, shares: Res<transit::TransitShares>, l
 
 fn update_blocks(
     link: Res<GrowthLink>,
+    layout: Res<ZoneLayout>,
     mut last: Local<Option<u64>>,
-    mut q: Query<(&ZoneBlock, &Glyph, &mut Transform, &mut Visibility)>,
+    mut blocks: Query<(&ZoneBlock, &mut Transform, &mut Visibility), Without<ZoneRoad>>,
+    mut roads: Query<(&ZoneRoad, &mut Visibility), Without<ZoneBlock>>,
 ) {
     let s = link.snapshots.latest();
     if *last == Some(s.tick) {
         return;
     }
     *last = Some(s.tick);
-    for (b, g, mut t, mut v) in &mut q {
-        let Some(&pop) = s.pop.get(b.0) else { continue };
-        // zone-level jitter (slot 0's) so neighbouring zones differ
-        let zone_j = hash01(b.0 as u64, 99);
-        *v = if g.slot < glyph_count(pop, zone_j) { Visibility::Inherited } else { Visibility::Hidden };
-        let size = glyph_size(pop, g.jitter);
-        t.scale = Vec3::new(size, 1.0, size);
+    let vis = |built: bool| if built { Visibility::Inherited } else { Visibility::Hidden };
+    for (b, mut t, mut v) in &mut blocks {
+        let (Some(&pop), Some(g)) = (s.pop.get(b.0), layout.0.get(b.0)) else { continue };
+        *v = vis(is_built(pop));
+        let base = match g.kind {
+            ZoneKind::Commercial => Vec2::splat(g.size.y + 1.0),
+            ZoneKind::Industrial => Vec2::new(g.size.x * 1.3, g.size.y * 1.1),
+            ZoneKind::Residential => g.size,
+        };
+        let k = footprint_scale(pop, g.capacity);
+        t.scale = Vec3::new(base.x * k, 1.0, base.y * k);
+    }
+    for (r, mut v) in &mut roads {
+        *v = vis(s.pop.get(r.0).is_some_and(|&p| is_built(p)));
     }
 }
 
@@ -340,60 +309,90 @@ mod tests {
     use super::*;
     use world_gen::generate_cities;
 
-    #[test]
-    fn zones_cover_cities_with_neighbour_edges() {
-        let cities = generate_cities(1, 3);
-        let (zones, geo, pairs) = build_zones(&cities);
-        let expect: usize = cities.iter().map(|c| (2 * c.radius as usize + 1).pow(2)).sum();
-        assert_eq!((zones.0.len(), geo.len()), (expect, expect));
-        assert!(zones.0.windows(2).all(|w| w[0].id < w[1].id));
-        let per: usize = cities.iter().map(|c| 2 * (2 * c.radius as usize + 1) * (2 * c.radius as usize)).sum();
-        assert_eq!(pairs.len(), per);
-        assert!(pairs.iter().all(|&(a, b)| geo[a].city == geo[b].city && geo[a].center.distance(geo[b].center) == 32.0));
-        assert_eq!(zone_network(sim_core::AgencyId(0), &geo, &pairs).len(), expect + per);
+    fn layout(seed: u64) -> Vec<ZoneGeo> {
+        build_layout(seed, &generate_cities(seed, 3))
+    }
+
+    fn sim(seed: u64) -> (GrowthSimulation, usize) {
+        let geo = layout(seed);
+        let n = geo.len();
+        let shared = Arc::new(Shared::default());
+        *shared.costs.lock().unwrap() = Some(CostMatrix::from_fn(n, |i, j| if i == j { 0.0 } else { 3.0 }));
+        (GrowthSimulation::new(zones_from(&geo), geo.iter().map(|g| g.parent).collect(), shared), n)
+    }
+
+    fn built(s: &GrowthSnapshot) -> usize {
+        s.pop.iter().filter(|&&p| is_built(p)).count()
     }
 
     #[test]
-    fn simulation_grows_with_costs_and_is_deterministic() {
-        let (zones, _, _) = build_zones(&generate_cities(1, 1));
-        let n = zones.0.len();
+    fn zone_network_matches_layout() {
+        let geo = layout(1);
+        let pairs = road_pairs(&geo);
+        assert_eq!(zone_network(sim_core::AgencyId(0), &geo, &pairs).len(), geo.len() + pairs.len());
+    }
+
+    #[test]
+    fn zone_count_after_five_minutes_stays_under_target() {
+        // 10 ticks/s: 3000 ticks = 5 minutes. Fresh game: a few built zones, far from the whole town.
+        let (mut s, n) = sim(1);
+        let start = built(&s.snapshot(0));
+        for t in 0..3000 {
+            s.step(t);
+        }
+        let after = built(&s.snapshot(3000));
+        assert!(after > start, "town must grow: {start} -> {after}");
+        assert!(after <= 60 && after * 2 < n, "5 min: {after} of {n} built (start {start})");
+    }
+
+    #[test]
+    fn growth_is_deterministic_and_gated_by_parent() {
         let run = || {
-            let shared = Arc::new(Shared::default());
-            *shared.costs.lock().unwrap() = Some(CostMatrix::from_fn(n, |i, j| if i == j { 0.0 } else { 3.0 }));
-            let mut s = GrowthSimulation::new(zones.clone(), shared);
-            let before = s.snapshot(0);
-            for t in 0..50 {
+            let (mut s, _) = sim(2);
+            for t in 0..400 {
                 s.step(t);
             }
-            (before, s.snapshot(50))
+            s.snapshot(400)
         };
-        let (b, a) = run();
-        assert!(a.pop.iter().sum::<f32>() > b.pop.iter().sum::<f32>());
-        assert_eq!(a, run().1);
+        let a = run();
+        assert_eq!(a, run());
+        let geo = layout(2);
+        for (i, g) in geo.iter().enumerate() {
+            if is_built(a.pop[i]) && geo[i].start_pop == 0.0 {
+                assert!(is_built(a.pop[g.parent.unwrap()]), "zone {i} built before its parent");
+            }
+        }
+    }
+
+    #[test]
+    fn transit_service_speeds_growth() {
+        let total = |share: f64| {
+            let (mut s, n) = sim(1);
+            *s.shared.shares.lock().unwrap() = vec![share; n];
+            for t in 0..1500 {
+                s.step(t);
+            }
+            s.snapshot(1500).pop.iter().sum::<f32>()
+        };
+        assert!(total(1.0) > total(0.0));
     }
 
     #[test]
     fn underserved_zones_emit_ghost_plans_after_streak() {
-        let (zones, geo, _) = build_zones(&generate_cities(1, 1));
-        let mut s = GrowthSimulation::new(zones, Arc::new(Shared::default()));
+        let (mut s, _) = sim(1);
         for t in 0..120 {
             s.step(t);
         }
         let snap = s.snapshot(120);
         assert!(!snap.pending.is_empty() && snap.road_reserve > 0.0);
+        let geo = layout(1);
         let (a, b) = plan_segment(&geo, snap.pending[0].zone.0 as usize).unwrap();
         assert!(a != b);
     }
 
     #[test]
-    fn glyphs_grow_with_density_and_cover_kinds() {
-        assert_eq!(glyph_count(0.0, 0.0), 1);
-        assert_eq!(glyph_count(PEAK_CAPACITY as f32, 0.9), 9);
-        assert!(glyph_count(100.0, 0.0) < glyph_count(1500.0, 0.0));
-        assert!(glyph_size(10.0, 0.5) < glyph_size(1900.0, 0.5));
-        let (_, geo, _) = build_zones(&generate_cities(1, 3));
-        for k in [ZoneKind::Residential, ZoneKind::Commercial] {
-            assert!(geo.iter().any(|g| g.kind == k));
-        }
+    fn footprint_grows_with_fill() {
+        assert!(footprint_scale(30.0, 1000.0) < footprint_scale(900.0, 1000.0));
+        assert!(is_built(30.0) && !is_built(29.0));
     }
 }
