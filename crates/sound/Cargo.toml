@@ -1,0 +1,8 @@
+[package]
+name = "sound"
+version = "0.1.0"
+edition.workspace = true
+description = "Procedural generative soundscape: sim events -> quantised tones + ambient bed."
+
+[dependencies]
+bevy.workspace = true
