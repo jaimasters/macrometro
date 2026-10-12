@@ -15,7 +15,7 @@ pub fn plan_layout(seed: u64, cities: &[CityRegion]) -> TownPlan {
         // R43: after a reset, one fresh town from the chosen preset and a new seed, at the first city's core
         (Some((preset, s)), Some(c)) if !cfg!(test) => {
             let (ox, oz) = c.center.origin_cell();
-            city::organic::plan_preset(s, Vec2::new(ox as f32 + 16.0, oz as f32 + 16.0), preset)
+            city::organic::plan_preset(seed, s, Vec2::new(ox as f32 + 16.0, oz as f32 + 16.0), preset)
         }
         _ => city::plan_towns(seed, &cities[..cities.len().min(TOWNS)]),
     }

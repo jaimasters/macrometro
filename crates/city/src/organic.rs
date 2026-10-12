@@ -1,6 +1,8 @@
-//! R42/R43 organic towns: long curving skeleton roads to a fixed reach, curved side streets that branch off and stop
-//! short of other roads (junctions only where roads really meet), and houses set back along the frontage, ordered
-//! out from the core. Curves are chains of short edges (degree-2 bends), so the RoadGraph shape is unchanged.
+//! One city-growth algorithm (Jai): a town is a small pre-placed seed (crossing skeleton roads) grown by the SAME
+//! growth step the running city uses. A preset only sets the seed size and how many steps have already happened;
+//! the steps after that are the plan's future, revealed at runtime by RoadBuilder in growth order (edge `order`).
+//! Each step extends a dead end outward or branches a curved side street off a through node, keeping junction
+//! clearance (junctions::merge_close) and connectivity (every road attaches to the network; no 1-segment stubs).
 use crate::roadgen::*;
 use bevy::math::Vec2;
 use world_gen::rng::SplitMix64;
@@ -24,16 +26,18 @@ impl Preset {
             Preset::LargeTown => "Large country town + interstate",
         }
     }
-    /// (skeleton roads, reach from the core, side streets, built houses)
-    fn shape(self) -> (usize, f32, usize, usize) {
+    /// (skeleton roads, seed reach from the core, growth steps already run, built houses)
+    pub fn shape(self) -> (usize, f32, usize, usize) {
         match self {
-            Preset::Hamlet => (1, 220.0, 0, 5),
-            Preset::SmallTown => (2, 320.0, 8, 40),
-            Preset::LargeTown => (2, 520.0, 26, 140),
+            Preset::Hamlet => (1, 48.0, 4, 5),
+            Preset::SmallTown => (2, 64.0, 30, 40),
+            Preset::LargeTown => (2, 96.0, 90, 140),
         }
     }
 }
 
+/// Growth steps planned past the preset (the city's future, built at runtime).
+pub const FUTURE_STEPS: usize = 120;
 const STEP: f32 = 16.0;
 const SETBACK: f32 = 6.0;
 const HOUSE_GAP: f32 = 9.0;
@@ -48,11 +52,15 @@ fn crosses(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     o(a, b, c) * o(a, b, d) < 0.0 && o(c, d, a) * o(c, d, b) < 0.0
 }
 
-struct G {
-    g: RoadGraph,
+/// A growing town graph.
+pub struct Town {
+    pub g: RoadGraph,
+    pub core: Vec2,
+    world: u64,
+    rng: SplitMix64,
 }
 
-impl G {
+impl Town {
     fn node(&mut self, p: Vec2) -> u32 {
         self.g.nodes.push(p);
         self.g.nodes.len() as u32 - 1
@@ -61,134 +69,162 @@ impl G {
         let len = self.g.nodes[a as usize].distance(self.g.nodes[b as usize]);
         self.g.edges.push(REdge { a, b, class, bridge: false, len, town: 0, order });
     }
-    /// Would a new segment p-q cross or crowd an existing road (other than at node `from`)?
-    fn blocked(&self, from: u32, p: Vec2, q: Vec2) -> bool {
+    fn degree(&self, n: u32) -> usize {
+        self.g.edges.iter().filter(|e| e.a == n || e.b == n).count()
+    }
+    /// Would a new segment p-q cross water (arterials may bridge a short run), cross a road, or crowd one?
+    fn blocked(&self, from: u32, p: Vec2, q: Vec2, class: RoadClass) -> bool {
+        let wet = water_run(self.world, p, q);
+        if !is_land(self.world, q) || (wet > 0.0 && (class != RoadClass::Arterial || wet > MAX_BRIDGE)) {
+            return true;
+        }
         self.g.edges.iter().any(|e| {
             let (a, b) = (self.g.nodes[e.a as usize], self.g.nodes[e.b as usize]);
             let touches = e.a == from || e.b == from;
             crosses(p, q, a, b) || (!touches && seg_dist(q, a, b) < CLEAR * 2.0)
         })
     }
-    /// A meandering road from node `n` heading `dir` for `len`, stopping early if it would hit another road.
-    fn grow(&mut self, rng: &mut SplitMix64, mut n: u32, mut dir: Vec2, len: f32, class: RoadClass, wiggle: f32, order: &mut u32) -> usize {
+    /// A meandering road from node `n` heading `dir` for `len`, stopping early if it would hit water or a road.
+    fn grow(&mut self, mut n: u32, mut dir: Vec2, len: f32, class: RoadClass, wiggle: f32, order: u32) -> usize {
         let mut made = 0;
         for _ in 0..(len / STEP).ceil() as usize {
-            dir = Vec2::from_angle((f(rng) as f32 - 0.5) * wiggle).rotate(dir).normalize();
+            dir = Vec2::from_angle((f(&mut self.rng) as f32 - 0.5) * wiggle).rotate(dir).normalize();
             let p = self.g.nodes[n as usize];
             let q = p + dir * STEP;
-            if self.blocked(n, p, q) {
+            if self.blocked(n, p, q, class) {
                 break;
             }
             let m = self.node(q);
-            *order += 1;
-            self.edge(n, m, class, *order);
+            self.edge(n, m, class, order);
             n = m;
             made += 1;
         }
         made
     }
+
+    /// The seed: `roads` skeleton roads crossing at the core, `reach` out each way (order 0 = built).
+    pub fn seed(world: u64, rng_seed: u64, core: Vec2, roads: usize, reach: f32, arterial: bool) -> Self {
+        let mut t = Town { g: RoadGraph::default(), core, world, rng: SplitMix64::new(rng_seed ^ 0x0E6A_1C) };
+        let c = t.node(core);
+        let turn = f(&mut t.rng) as f32 * std::f32::consts::TAU;
+        for k in 0..roads {
+            let axis = Vec2::from_angle(turn + k as f32 * std::f32::consts::FRAC_PI_2);
+            let class = if arterial && k == 0 { RoadClass::Arterial } else { RoadClass::Local };
+            for d in [axis, -axis] {
+                t.grow(c, d, reach, class, 0.3, 0);
+            }
+        }
+        t
+    }
+
+    /// ONE growth step, used for fresh cities and for the runtime plan alike. New edges get `order`.
+    /// Returns false (graph unchanged) when the chosen spot can't take a road this time.
+    pub fn step(&mut self, order: u32) -> bool {
+        let (n0, e0) = (self.g.nodes.len(), self.g.edges.len());
+        let n = (self.rng.next_u64() % n0 as u64) as u32;
+        let p = self.g.nodes[n as usize];
+        let ok = match self.degree(n) {
+            // extend a dead end outward, keeping its class (skeleton roads keep reaching out)
+            1 => {
+                let e = self.g.edges.iter().find(|e| e.a == n || e.b == n).unwrap().clone();
+                let back = self.g.nodes[(e.a + e.b - n) as usize];
+                self.grow(n, (p - back).normalize(), STEP * 3.0, e.class, 0.3, order) >= 1
+            }
+            // branch a side street off a through node, spaced from other junctions; >= 2 segments or nothing
+            2 if p.distance(self.core) >= STEP * 1.5 => {
+                let e = self.g.edges.iter().find(|e| e.a == n || e.b == n).unwrap().clone();
+                let gap = junction_gap(e.class);
+                let crowded = (0..n0 as u32).any(|m| m != n && self.degree(m) >= 3 && self.g.nodes[m as usize].distance(p) < gap);
+                let along = (self.g.nodes[e.b as usize] - self.g.nodes[e.a as usize]).normalize();
+                let side = if self.rng.next_u64() % 2 == 0 { 1.0 } else { -1.0 };
+                let len = STEP * (3.0 + f(&mut self.rng) as f32 * 5.0);
+                !crowded && self.grow(n, along.perp() * side, len, RoadClass::Local, 0.6, order) >= 2
+            }
+            _ => false,
+        };
+        if !ok {
+            self.g.nodes.truncate(n0);
+            self.g.edges.truncate(e0);
+            return false;
+        }
+        crate::junctions::merge_close(&mut self.g, 0, 0, |e| crate::lanes::default_class(e.class));
+        true
+    }
+
+    /// Run `steps` growth steps (failed attempts don't count; bounded tries) with orders from `order0`.
+    pub fn run(&mut self, steps: usize, order0: u32) {
+        let (mut done, mut tries) = (0, 0);
+        while done < steps && tries < steps * 20 + 20 {
+            tries += 1;
+            if self.step(order0 + done as u32) {
+                done += 1;
+            }
+        }
+    }
 }
 
-/// A fresh town for a reset: skeleton roads cross at `core` and run `reach` out, then side streets and houses.
-pub fn plan_preset(seed: u64, core: Vec2, preset: Preset) -> TownPlan {
-    let (roads, reach, streets, houses) = preset.shape();
-    let mut rng = SplitMix64::new(seed ^ 0x0E6A_1C);
-    let mut g = G { g: RoadGraph::default() };
-    let c = g.node(core);
-    let turn = f(&mut rng) as f32 * std::f32::consts::TAU;
-    // skeleton: both directions from the core, so a two-road town crosses in the middle (one real junction)
-    for k in 0..roads {
-        let axis = Vec2::from_angle(turn + k as f32 * std::f32::consts::FRAC_PI_2);
-        for d in [axis, -axis] {
-            let mut o = 0;
-            let mut n = c;
-            let mut i = 0;
-            while g.g.nodes[n as usize].distance(core) < reach && i < 200 {
-                i += 1;
-                // gentle bends, steered back toward the axis so the road keeps its reach
-                let p = g.g.nodes[n as usize];
-                let off = (p - core).perp_dot(d);
-                let bend = (f(&mut rng) as f32 - 0.5) * 0.5 + off * 0.01;
-                let q = p + Vec2::from_angle(bend).rotate(d) * STEP;
-                let m = g.node(q);
-                let class = if preset == Preset::LargeTown && k == 0 { RoadClass::Arterial } else { RoadClass::Local };
-                g.edge(n, m, class, o.max(i as u32));
-                o += 1;
-                n = m;
-            }
-        }
+/// A fresh town: seed + the preset's growth steps (built, order 0), then FUTURE_STEPS more of the same step as the
+/// plan's future (order 1..). `world` is the terrain seed, `rng_seed` varies the town.
+pub fn plan_preset(world: u64, rng_seed: u64, core: Vec2, preset: Preset) -> TownPlan {
+    let (roads, reach, steps, houses) = preset.shape();
+    let mut t = Town::seed(world, rng_seed, core, roads, reach, preset == Preset::LargeTown);
+    t.run(steps, 0);
+    for e in &mut t.g.edges {
+        e.order = 0;
     }
-    // side streets branch off existing nodes (never mid-edge), curve, and stop short of other roads
-    let mut tries = 0;
-    let mut made = 0;
-    while made < streets && tries < streets * 20 {
-        tries += 1;
-        let n = (rng.next_u64() % g.g.nodes.len() as u64) as u32;
-        let p = g.g.nodes[n as usize];
-        if p.distance(core) > reach * 0.6 || p.distance(core) < STEP * 1.5 {
-            continue;
-        }
-        let deg = g.g.edges.iter().filter(|e| e.a == n || e.b == n).count();
-        if deg != 2 {
-            continue;
-        }
-        let e = g.g.edges.iter().find(|e| e.a == n || e.b == n).unwrap();
-        // spacing: no new junction within the parent road's junction gap of an existing one
-        let gap = junction_gap(e.class);
-        let crowded = (0..g.g.nodes.len()).any(|m| {
-            m != n as usize && g.g.edges.iter().filter(|e| e.a as usize == m || e.b as usize == m).count() >= 3 && g.g.nodes[m].distance(p) < gap
-        });
-        if crowded {
-            continue;
-        }
-        let along = (g.g.nodes[e.b as usize] - g.g.nodes[e.a as usize]).normalize();
-        let side = if rng.next_u64() % 2 == 0 { 1.0 } else { -1.0 };
-        let len = STEP * (3.0 + (f(&mut rng) as f32) * 5.0);
-        let mut o = 100 + made as u32 * 10;
-        if g.grow(&mut rng, n, along.perp() * side, len, RoadClass::Local, 0.6, &mut o) >= 2 {
-            made += 1;
-        }
-    }
-    crate::junctions::merge_close(&mut g.g, 0, 0, |e| crate::lanes::default_class(e.class));
+    t.run(FUTURE_STEPS, 1);
+    let g = t.g;
     // houses: both sides of every edge, set back, in order out from the core; skip anything crowding a road/house
     let mut slots: Vec<(f32, Vec2, usize, f32)> = vec![];
-    for (i, e) in g.g.edges.iter().enumerate() {
-        let (a, b) = (g.g.nodes[e.a as usize], g.g.nodes[e.b as usize]);
+    for (i, e) in g.edges.iter().enumerate() {
+        let (a, b) = (g.nodes[e.a as usize], g.nodes[e.b as usize]);
         let d = (b - a).normalize();
-        let mut t = HOUSE_GAP / 2.0;
-        while t < e.len {
-            for s in [1.0, -1.0] {
-                let p = a + d * t + d.perp() * s * SETBACK;
-                slots.push((p.distance(core), p, i, (-d.perp() * s).to_angle()));
+        let mut s = HOUSE_GAP / 2.0;
+        while s < e.len {
+            for side in [1.0, -1.0] {
+                let p = a + d * s + d.perp() * side * SETBACK;
+                slots.push((p.distance(core), p, i, (-d.perp() * side).to_angle()));
             }
-            t += HOUSE_GAP;
+            s += HOUSE_GAP;
         }
     }
     slots.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let far = slots.last().map_or(1.0, |s| s.0);
     let mut parcels: Vec<Parcel> = vec![];
+    let mut built = 0;
     for (dist, p, access, angle) in slots {
-        let road_ok = g.g.edges.iter().all(|e| seg_dist(p, g.g.nodes[e.a as usize], g.g.nodes[e.b as usize]) >= SETBACK - 0.5);
-        if !road_ok || parcels.iter().any(|q| q.center.distance(p) < HOUSE_GAP * 0.9) || !footprint_on_land(seed, p) {
+        let road_ok = g.edges.iter().all(|e| seg_dist(p, g.nodes[e.a as usize], g.nodes[e.b as usize]) >= SETBACK - 0.5);
+        if !road_ok || parcels.iter().any(|q| q.center.distance(p) < HOUSE_GAP * 0.9) || !footprint_on_land(world, p) {
             continue;
         }
         let k = parcels.len();
+        let kind = if k < 3 && preset != Preset::Hamlet {
+            ZoneKind::Commercial
+        } else if dist > far * 0.8 && k % 4 == 0 {
+            ZoneKind::Industrial
+        } else {
+            ZoneKind::Residential
+        };
+        let live = built < houses && g.edges[access].order <= SEED_ORDER;
+        built += live as usize;
         parcels.push(Parcel {
             center: p,
             town: 0,
-            kind: if k < 3 && preset != Preset::Hamlet { ZoneKind::Commercial } else { ZoneKind::Residential },
+            kind,
             access,
             angle,
             size: Vec2::new(5.0, 5.0),
             capacity: (PEAK_CAPACITY * 0.05 / (1.0 + dist as f64 / 60.0)).max(20.0),
-            start_pop: if k < houses { 40.0 } else { 0.0 },
+            start_pop: if live { 40.0 } else { 0.0 },
             core: k == 0,
         });
     }
-    for e in &mut g.g.edges {
-        let (a, b) = (g.g.nodes[e.a as usize], g.g.nodes[e.b as usize]);
-        e.bridge = water_run(seed, a, b) > 0.0;
+    let mut g = g;
+    for e in &mut g.edges {
+        let (a, b) = (g.nodes[e.a as usize], g.nodes[e.b as usize]);
+        e.bridge = water_run(world, a, b) > 0.0;
     }
-    TownPlan { graph: g.g, parcels, towns: vec![TownMeta { town: 0, core, core_node: c, kind: SeedKind::Crossroads }] }
+    TownPlan { graph: g, parcels, towns: vec![TownMeta { town: 0, core, core_node: 0, kind: SeedKind::Crossroads }] }
 }
 
 #[cfg(test)]
@@ -217,29 +253,54 @@ mod tests {
         }
     }
 
+    /// Dead-end spurs (from a degree-1 node back to the first junction) are at least two segments long.
+    fn assert_no_stubs(g: &RoadGraph, what: &str) {
+        let inc = g.incident();
+        for n in (0..g.nodes.len()).filter(|&n| inc[n].len() == 1) {
+            let (mut at, mut e, mut segs) = (n, inc[n][0], 1);
+            loop {
+                at = (g.edges[e].a + g.edges[e].b) as usize - at;
+                if inc[at].len() != 2 {
+                    break;
+                }
+                e = if inc[at][0] == e { inc[at][1] } else { inc[at][0] };
+                segs += 1;
+            }
+            assert!(inc[at].len() == 1 || segs >= 2, "{what}: 1-segment stub at node {n}");
+        }
+    }
+
+    fn connected(g: &RoadGraph, keep: impl Fn(&REdge) -> bool) -> bool {
+        let inc = g.incident();
+        let used: Vec<bool> = (0..g.nodes.len()).map(|n| inc[n].iter().any(|&e| keep(&g.edges[e]))).collect();
+        let Some(s) = used.iter().position(|&u| u) else { return true };
+        let mut seen = vec![false; g.nodes.len()];
+        let mut st = vec![s];
+        while let Some(n) = st.pop() {
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+            st.extend(inc[n].iter().filter(|&&e| keep(&g.edges[e])).map(|&e| (g.edges[e].a + g.edges[e].b) as usize - n));
+        }
+        (0..g.nodes.len()).all(|n| !used[n] || seen[n])
+    }
+
+    /// Presets come only from seed + Town::step; after seed + N steps (built) and the future steps, across seeds:
+    /// connected (also the built part alone), no stubs, junction clearance, spacing, no crossings, houses on roads.
     #[test]
     fn presets_are_connected_reachable_and_every_house_has_access() {
-        for seed in [1, 7, 42] {
+        for seed in [1, 2, 3, 7, 42, 99] {
+            let mut size = 0;
             for p in Preset::ALL {
-                let plan = plan_preset(seed, Vec2::new(5000.0, 5000.0), p);
+                let plan = plan_preset(seed, seed * 31, Vec2::new(5000.0, 5000.0), p);
                 let g = &plan.graph;
-                // connected
                 let inc = g.incident();
-                let mut seen = vec![false; g.nodes.len()];
-                let mut st = vec![0usize];
-                while let Some(n) = st.pop() {
-                    if std::mem::replace(&mut seen[n], true) {
-                        continue;
-                    }
-                    for &e in &inc[n] {
-                        st.push((g.edges[e].a + g.edges[e].b) as usize - n);
-                    }
-                }
-                assert!(seen.iter().all(|&s| s), "{p:?} seed {seed}: disconnected");
-                // skeleton reach
-                let far = g.nodes.iter().map(|q| q.distance(plan.towns[0].core)).fold(0.0, f32::max);
-                let reach = p.shape().1;
-                assert!(far >= reach * 0.9, "{p:?} seed {seed}: reach {far} < {reach}");
+                assert!(connected(g, |_| true), "{p:?} seed {seed}: disconnected");
+                assert!(connected(g, |e| e.order <= SEED_ORDER), "{p:?} seed {seed}: built roads disconnected");
+                assert_no_stubs(g, &format!("{p:?} seed {seed}"));
+                let built = g.edges.iter().filter(|e| e.order <= SEED_ORDER).count();
+                assert!(built > size, "{p:?} seed {seed}: {built} built edges, not bigger than the smaller preset");
+                size = built;
                 // houses front a real road, close to it
                 assert!(!plan.parcels.is_empty());
                 for z in &plan.parcels {
