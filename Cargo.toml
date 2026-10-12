@@ -21,3 +21,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Pages caps files at 25 MiB; keep wasm small.
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+debug = false

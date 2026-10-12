@@ -6,3 +6,4 @@ description = "Money, land value, greenfield vs compulsory-acquisition costs."
 
 [dependencies]
 bevy.workspace = true
+sim_core = { path = "../sim_core" }
