@@ -806,7 +806,7 @@ fn gen_town(seed: u64, region: &CityRegion, plan: &mut TownPlan) {
                     .filter(|(k, _)| e0 + k != e)
                     .all(|(k, _)| {
                         let (p, q) = g.pos(e0 + k);
-                        seg_dist(c, p, q) >= sz.y * 0.5 + 1.3
+                        seg_dist(c, p, q) >= sz.y * 0.5 + 1.8
                     });
                 if !clear || found.iter().any(|p| p.center.distance(c) < PARCEL_SPACING - 0.5) {
                     continue;

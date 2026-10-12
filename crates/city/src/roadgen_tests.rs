@@ -162,3 +162,24 @@ fn dump_for_plotting() {
     }
     std::fs::write(path, s).unwrap();
 }
+
+/// R23: buildings sit beside roads, never on a junction/road node, even at full-grown footprint (1.1x, industrial 1.3x/1.1x).
+#[test]
+fn lots_sit_on_road_sides_not_on_nodes() {
+    for seed in SEEDS {
+        let p = plan(seed);
+        for z in &p.parcels {
+            let half_depth = z.size.y * 0.5 * 1.1 * 1.1; // largest footprint (industrial yard at full fill)
+            for n in &p.graph.nodes {
+                assert!(z.center.distance(*n) > 3.2, "seed {seed}: lot centre on road node {n:?}");
+            }
+            let (a, b) = p.graph.pos(z.access);
+            let d = seg_dist(z.center, a, b);
+            assert!(d >= half_depth + 1.0 && d <= 7.0, "seed {seed}: lot not set back beside its road (d={d})");
+            // faces the road: long axis parallel to the frontage edge
+            let dir = (b - a).normalize();
+            let ax = Vec2::new(z.angle.cos(), z.angle.sin());
+            assert!(dir.dot(ax).abs() > 0.999, "seed {seed}: lot not aligned to road");
+        }
+    }
+}
