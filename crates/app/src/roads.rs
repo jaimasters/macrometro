@@ -30,6 +30,12 @@ const CAR_LEN: f32 = 1.6;
 const CAR_GAP: f32 = 0.8;
 const CAR_ACCEL: f32 = 4.0;
 const CAR_BRAKE: f32 = 8.0;
+/// Kinematic bicycle: wheelbase, steering limit (rad), steering slew (rad/s), yaw-rate cap (rad/s), lane offset.
+const WHEELBASE: f32 = 0.9;
+const MAX_STEER: f32 = 0.7;
+const STEER_RATE: f32 = 6.0;
+const MAX_YAW: f32 = 2.5;
+const LANE_OFF: f32 = 0.55;
 const NEUTRAL: u8 = 255;
 
 #[derive(Component)]
@@ -160,11 +166,18 @@ pub fn tint_colour(bucket: usize) -> Color {
     Color::srgb(a.0 + (r.0 - a.0) * k, a.1 + (r.1 - a.1) * k, a.2 + (r.2 - a.2) * k)
 }
 
-/// A car on its way: the route plus how far along segment `seg` it is.
+/// A car on its way. The car owns its pose (`pos`, `head`, `steer`, `v`) and integrates a kinematic bicycle; the route
+/// is only the path it steers toward. `seg`/`along` are its progress, found by projecting `pos` onto the route.
 struct Journey {
     trip: Trip,
     seg: usize,
     along: f32,
+    pos: Vec2,
+    /// Heading angle (rad, atan2 of the travel direction).
+    head: f32,
+    steer: f32,
+    /// Drive on the left (lane offset side).
+    left: bool,
     /// Current speed (world units / s): cars accelerate and brake, they do not jump to the limit.
     v: f32,
     /// Seconds stopped (gridlock breaker: the longest waiter may enter a held junction).
@@ -188,36 +201,123 @@ fn target_speed(j: &Journey, slow: &impl Fn(usize) -> f32) -> f32 {
     j.trip.seg_speed[j.seg] * VIS_SPEED / slow(j.trip.seg_edge[j.seg]).max(1.0)
 }
 
-/// Advance `d` world units along the route. False once it has arrived.
-fn move_by(j: &mut Journey, mut d: f32) -> bool {
-    while j.seg + 1 < j.trip.pts.len() {
-        let len = j.trip.pts[j.seg].distance(j.trip.pts[j.seg + 1]).max(1e-3);
-        if j.along + d < len {
-            j.along += d;
-            return true;
-        }
-        d -= len - j.along;
-        j.seg += 1;
-        j.along = 0.0;
+fn seg_dir(t: &Trip, s: usize) -> Vec2 {
+    (t.pts[s + 1] - t.pts[s]).normalize_or_zero()
+}
+/// Point `a` along route segment `s`, shifted into the driving lane.
+/// The lane is the route offset sideways with mitred corners, so it is one continuous line through bends and junctions
+/// (pure pursuit then follows the lane round the corner instead of cutting a chord between two offset segments).
+fn lane_pt(t: &Trip, s: usize, a: f32, left: bool) -> Vec2 {
+    let off = if left { -LANE_OFF } else { LANE_OFF };
+    let vtx = |i: usize| {
+        let nrm = |d: Vec2| Vec2::new(-d.y, d.x);
+        let n1 = nrm(seg_dir(t, i.min(t.pts.len() - 2)));
+        let n0 = if i > 0 { nrm(seg_dir(t, i - 1)) } else { n1 };
+        let m = (n0 + n1).normalize_or(n1);
+        t.pts[i] + m * off / m.dot(n1).max(0.5)
+    };
+    let len = t.pts[s].distance(t.pts[s + 1]).max(1e-4);
+    vtx(s).lerp(vtx(s + 1), a / len)
+}
+
+impl Journey {
+    /// A parked car at the start of its route's lane, facing along it (spawn only; it drives itself from here).
+    fn new(trip: Trip, left: bool, slot: usize) -> Self {
+        let (pos, d) = (lane_pt(&trip, 0, 0.0, left), seg_dir(&trip, 0));
+        Journey { pos, head: d.y.atan2(d.x), steer: 0.0, left, trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot }
     }
-    false
+    fn dir(&self) -> Vec2 {
+        Vec2::from_angle(self.head)
+    }
+    /// Pure-pursuit target: the lane point `l` ahead of the car's progress (clamped to the route end).
+    fn lookahead(&self, mut l: f32) -> Vec2 {
+        let (mut s, mut a) = (self.seg, self.along);
+        loop {
+            let len = self.trip.pts[s].distance(self.trip.pts[s + 1]);
+            if a + l < len || s + 2 >= self.trip.pts.len() {
+                return lane_pt(&self.trip, s, (a + l).min(len), self.left);
+            }
+            l -= len - a;
+            (s, a) = (s + 1, 0.0);
+        }
+    }
+    /// Distance from the car to the lane line of route segment `s`.
+    fn lane_dist(&self, s: usize) -> f32 {
+        let len = self.trip.pts[s].distance(self.trip.pts[s + 1]);
+        let a = (self.pos - self.trip.pts[s]).dot(seg_dir(&self.trip, s)).clamp(0.0, len);
+        self.pos.distance(lane_pt(&self.trip, s, a, self.left))
+    }
+    /// `p` is in this car's lane over its next few segments (cars waiting in other lanes or arms are not in the way;
+    /// junction conflicts are the holds' job).
+    fn on_my_lane(&self, p: Vec2) -> bool {
+        (self.seg..(self.seg + 4).min(self.trip.pts.len() - 1)).any(|s| {
+            let len = self.trip.pts[s].distance(self.trip.pts[s + 1]);
+            let a = (p - self.trip.pts[s]).dot(seg_dir(&self.trip, s)).clamp(0.0, len);
+            p.distance(lane_pt(&self.trip, s, a, self.left)) < 0.6
+        })
+    }
+    /// Progress = projection of the car's own position onto the route (read-only of the pose). Moves on to the next
+    /// segment once past this one's end or nearer the next one's lane (cars cut corners).
+    fn track(&mut self) {
+        while self.seg + 2 < self.trip.pts.len() {
+            let past = (self.pos - self.trip.pts[self.seg]).dot(seg_dir(&self.trip, self.seg)) >= seg_len(self);
+            if !(past || self.lane_dist(self.seg + 1) < self.lane_dist(self.seg)) {
+                break;
+            }
+            self.seg += 1;
+        }
+        self.along = (self.pos - self.trip.pts[self.seg]).dot(seg_dir(&self.trip, self.seg)).clamp(0.0, seg_len(self));
+    }
+    fn arrived(&self) -> bool {
+        self.seg + 2 >= self.trip.pts.len() && seg_len(self) - self.along < 0.15
+    }
+    /// Corner speed: slow enough that the curvature needed to reach the path 4 units ahead keeps lateral accel <= 3.
+    fn corner_speed(&self) -> f32 {
+        let to = self.lookahead(4.0) - self.pos;
+        let k = 2.0 * self.dir().angle_to(to).sin().abs() / to.length().max(0.5);
+        (2.5 / k.max(1e-3)).sqrt().max(1.0)
+    }
+    /// One kinematic-bicycle tick at the already-chosen speed `self.v`: pure pursuit picks a steering angle, slewed
+    /// and clamped; yaw rate is capped; position integrates along the heading. Nothing here reads the pose off the spline.
+    fn drive(&mut self, dt: f32) {
+        let l = 1.0 + 0.3 * self.v;
+        let to = self.lookahead(l) - self.pos;
+        let alpha = self.dir().angle_to(to);
+        let want = (2.0 * WHEELBASE * alpha.sin()).atan2(to.length().max(0.5)).clamp(-MAX_STEER, MAX_STEER);
+        self.steer += (want - self.steer).clamp(-STEER_RATE * dt, STEER_RATE * dt);
+        let yaw = (self.v / WHEELBASE * self.steer.tan()).clamp(-MAX_YAW, MAX_YAW);
+        self.head += yaw * dt;
+        self.pos += self.dir() * self.v * dt;
+        self.track();
+    }
+}
+
+/// Bumper gap to the nearest car in front of `i` (actual positions): ahead of its nose, within a car width of its
+/// heading line, and not oncoming. ponytail: O(n^2) over <=420 cars, grid-bucket it if profiling shows.
+fn gap_ahead(cars: &[Journey], i: usize) -> f32 {
+    let (p, h) = (cars[i].pos, cars[i].dir());
+    let mut gap = f32::INFINITY;
+    for (k, o) in cars.iter().enumerate() {
+        let r = o.pos - p;
+        if k != i && r.dot(h) > 0.0 && r.length() < 20.0 && o.dir().dot(h) > -0.3 && cars[i].on_my_lane(o.pos) {
+            gap = gap.min(r.length() - CAR_LEN);
+        }
+    }
+    gap
 }
 
 #[cfg(test)]
-fn advance(j: &mut Journey, dt: f32, slow: impl Fn(usize) -> f32) -> bool {
-    let v = target_speed(j, &slow);
-    move_by(j, v * dt)
-}
-
 type Key = (u32, u32, u32, u32);
 fn pkey(p: Vec2) -> (u32, u32) {
     (p.x.to_bits(), p.y.to_bits())
 }
+#[cfg(test)]
 /// Directed road segment `k` of a route: cars share a lane only when both endpoints match (so `along` is comparable).
 fn seg_key(t: &Trip, k: usize) -> Option<Key> {
     let (a, b) = (pkey(*t.pts.get(k)?), pkey(*t.pts.get(k + 1)?));
     Some((a.0, a.1, b.0, b.1))
 }
+#[cfg(test)]
 fn lane_key(j: &Journey) -> Option<Key> {
     seg_key(&j.trip, j.seg)
 }
@@ -227,7 +327,7 @@ fn seg_len(j: &Journey) -> f32 {
 }
 
 /// Junction zone: a car this close to a node (either side) holds it; others wait at the stop line before it.
-const JUNC: f32 = 1.6;
+const JUNC: f32 = 4.5;
 
 /// One car-following step for every car (in index order, deterministic): accelerate toward the congestion-limited
 /// speed, but never faster than lets the car stop behind the one ahead in its lane, or at the stop line of a junction
@@ -237,7 +337,6 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
     // passing node pts[s+1] from freeway segment s onto freeway segment s+1
     let thru = |c: &Journey, s: usize| s + 1 < c.trip.seg_edge.len() && free(c.trip.seg_edge[s]) && free(c.trip.seg_edge[s + 1]);
     use std::collections::HashMap;
-    let mut lanes: HashMap<Key, Vec<f32>> = HashMap::new();
     let mut held: HashMap<(u32, u32), usize> = HashMap::new();
     // only real junctions (3+ distinct neighbours over all routes) are held: a through node never blocks the
     // opposite direction, which deadlocked two-way roads. ponytail: rebuilt per step, cache with the plan if it shows.
@@ -255,9 +354,6 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
     }
     let junc = |p: Vec2| nb.get(&pkey(p)).is_some_and(|v| v.len() >= 3);
     for (i, c) in cars.iter().enumerate() {
-        if let Some(k) = lane_key(c) {
-            lanes.entry(k).or_default().push(c.along);
-        }
         if c.seg > 0 && c.along < JUNC && junc(c.trip.pts[c.seg]) && !thru(c, c.seg - 1) {
             held.entry(pkey(c.trip.pts[c.seg])).or_insert(i);
         }
@@ -273,16 +369,16 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
     for i in 0..cars.len() {
         let c = &cars[i];
         let len = seg_len(c);
-        let mut gap = f32::INFINITY;
-        if let Some(k) = lane_key(c) {
-            let same = lanes.get(&k).into_iter().flatten().copied().filter(|&a| a > c.along + 1e-4).fold(f32::INFINITY, f32::min);
-            gap = gap.min(same - c.along - CAR_LEN);
-            if let Some(nk) = seg_key(&c.trip, c.seg + 1) {
-                let ahead = lanes.get(&nk).into_iter().flatten().copied().fold(f32::INFINITY, f32::min);
-                gap = gap.min(len - c.along + ahead - CAR_LEN);
+        // following: the actual bumper gap to the car in front, whatever lane or segment it is on
+        let mut gap = gap_ahead(cars, i);
+        {
+            if c.seg + 2 < c.trip.pts.len() {
                 let node = pkey(c.trip.pts[c.seg + 1]);
-                // enter only when held by no one else AND the exit lane has room: queues form behind the junction
-                let room = ahead >= CAR_LEN + CAR_GAP || !junc(c.trip.pts[c.seg + 1]);
+                // enter only when held by no one else AND the exit lane has room (measured: no car within a car+gap of
+                // the exit lane's start, heading out): queues form behind the junction
+                let (exit, dn) = (lane_pt(&c.trip, c.seg + 1, 0.0, c.left), seg_dir(&c.trip, c.seg + 1));
+                let blocked = cars.iter().enumerate().any(|(k, o)| k != i && o.pos.distance(exit) < CAR_LEN + CAR_GAP && (o.pos - exit).dot(dn) > -0.5 && o.dir().dot(dn) > 0.7);
+                let room = !blocked || !junc(c.trip.pts[c.seg + 1]);
                 if junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && (held.get(&node).is_some_and(|&h| h != i) || !room) && boss != Some(i) {
                     gap = gap.min(len - JUNC - c.along + CAR_GAP);
                 } else if !thru(c, c.seg) && len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
@@ -290,17 +386,18 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
                 }
             }
         }
-        let vmax = if gap.is_finite() { target_speed(c, &slow).min((2.0 * CAR_BRAKE * (gap - CAR_GAP).max(0.0)).sqrt()) } else { target_speed(c, &slow) };
+        let free_v = target_speed(c, &slow).min(c.corner_speed());
+        let vmax = if gap.is_finite() { free_v.min((2.0 * CAR_BRAKE * (gap - CAR_GAP).max(0.0)).sqrt()) } else { free_v };
         let c = &mut cars[i];
         c.v += (vmax - c.v).clamp(-CAR_BRAKE * dt, CAR_ACCEL * dt);
         c.v = c.v.max(0.0);
         c.wait = if c.v < 0.05 { c.wait + dt } else { 0.0 };
-        // never step past the stop distance this tick (the speed cap alone can overshoot by v*dt)
-        let step = if gap.is_finite() { (c.v * dt).min((gap - CAR_GAP * 0.5).max(0.0)) } else { c.v * dt };
-        keep.push(move_by(c, step));
-        if let Some(k) = lane_key(c) {
-            lanes.entry(k).or_default().push(c.along);
+        // never cover more than the stop distance this tick (the speed cap alone can overshoot by v*dt)
+        if gap.is_finite() {
+            c.v = c.v.min((gap - CAR_GAP * 0.5).max(0.0) / dt);
         }
+        c.drive(dt);
+        keep.push(!c.arrived());
     }
     let mut k = keep.into_iter();
     cars.retain(|_| k.next().unwrap_or(true));
@@ -332,16 +429,10 @@ fn ring_trip(t: &mut Trip, rings: &Rings, left: bool) {
     (t.pts, t.seg_edge, t.seg_speed) = (pts, se, ss);
 }
 
-/// Position and heading of a journey (driving on one side of the road).
 /// Drive on the left instead of the right (R34). Saved with the game.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LeftHand(pub bool);
 
-fn journey_pose(j: &Journey, left: bool) -> (Vec2, Vec2) {
-    let (a, b) = (j.trip.pts[j.seg], j.trip.pts[j.seg + 1]);
-    let d = (b - a).normalize_or_zero();
-    (a + d * j.along + Vec2::new(-d.y, d.x) * if left { -0.55 } else { 0.55 }, d)
-}
 
 pub struct RoadsPlugin;
 
@@ -578,7 +669,7 @@ fn drive_cars(
                 let mut trip = trip;
                 ring_trip(&mut trip, &j.rings, hand.0);
                 let slot = (0..MAX_CARS).find(|k| !j.cars.iter().any(|c| c.slot == *k)).unwrap_or(0);
-                j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot });
+                j.cars.push(Journey::new(trip, hand.0, slot));
             }
         }
     }
@@ -593,9 +684,9 @@ fn drive_cars(
             }
             continue;
         };
-        let (p, h) = journey_pose(c, hand.0);
-        tf.translation = Vec3::new(p.x, Y_CAR, p.y);
-        tf.rotation = Quat::from_rotation_y(-h.y.atan2(h.x));
+        // the car's own integrated pose, never a spline sample
+        tf.translation = Vec3::new(c.pos.x, Y_CAR, c.pos.y);
+        tf.rotation = Quat::from_rotation_y(-c.head);
         tf.scale = Vec3::splat(car_scale(view));
         *v = Visibility::Inherited;
     }
@@ -626,43 +717,89 @@ mod tests {
             nodes: vec![],
             edges: vec![],
         };
-        Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot: 0 }
+        Journey::new(trip, false, 0)
+    }
+    /// A car already standing `x` along the first (straight) leg, in its lane.
+    fn at(speed: f32, x: f32) -> Journey {
+        let mut j = journey(speed);
+        j.pos.x = x;
+        j.track();
+        j
+    }
+
+    /// Drive one car alone to its destination: heading changes continuously with a bounded yaw rate, every step is
+    /// at most v*dt (no teleport), it stays near its lane, and it is removed only on arrival.
+    fn drive_alone(trip: Trip) -> f32 {
+        let dt = 0.05;
+        let end = *trip.pts.last().unwrap();
+        let mut cars = vec![Journey::new(trip, false, 0)];
+        let mut turned = 0.0;
+        for _ in 0..4000 {
+            let (p, h, v0) = (cars[0].pos, cars[0].head, cars[0].v);
+            follow_step(&mut cars, dt, |_| 1.0, |_| false);
+            let Some(c) = cars.first() else { return turned };
+            let dh = (c.head - h + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            assert!(dh.abs() <= MAX_YAW * dt + 1e-4, "yaw rate {} rad/s", dh / dt);
+            assert!(c.pos.distance(p) <= v0.max(c.v) * dt + 1e-4, "teleport {} in one step", c.pos.distance(p));
+            let err = c.pos.distance(lane_pt(&c.trip, c.seg, c.along, false));
+            assert!(err < 1.5, "left its lane by {err}");
+            turned += dh;
+        }
+        panic!("never arrived at {end}");
+    }
+
+    #[test]
+    fn a_car_steers_round_a_bend_and_through_a_junction_kinematically() {
+        // the 90 degree bend
+        let t = drive_alone(journey(2.0).trip);
+        assert!((t - std::f32::consts::FRAC_PI_2).abs() < 0.3, "turned {t} rad round the bend");
+        // straight over a plain junction, then left and right turns through a roundabout
+        let mut rings = Rings::new();
+        rings.insert(pkey(Vec2::ZERO), city::junctions::Ring { c: Vec2::ZERO, r: 3.0, legs: vec![-std::f32::consts::FRAC_PI_2, 0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI] });
+        for out in [Vec2::Y, -Vec2::X, -Vec2::Y] {
+            for ring in [false, true] {
+                let mut trip = Trip { from: 0, to: 1, pts: vec![Vec2::X * 18.0, Vec2::X * 12.0, Vec2::ZERO, out * 12.0, out * 18.0], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
+                if ring {
+                    ring_trip(&mut trip, &rings, false);
+                }
+                drive_alone(trip);
+            }
+        }
     }
 
     #[test]
     fn a_car_drives_its_route_in_order_then_disappears() {
-        let mut j = journey(2.0); // 3 world units/s
-        assert!(advance(&mut j, 2.0, |_| 1.0));
-        assert_eq!(j.seg, 0);
-        assert!((journey_pose(&j, false).0.x - 6.0).abs() < 1e-4);
-        assert!(advance(&mut j, 2.0, |_| 1.0), "rounds the corner onto the next road");
-        assert_eq!(j.seg, 1);
-        assert!(journey_pose(&j, false).0.y > 1.0 && journey_pose(&j, false).1.y > 0.9);
-        assert!(!advance(&mut j, 10.0, |_| 1.0), "arrived: despawn");
+        let mut cars = vec![journey(2.0)];
+        let mut seg = 0;
+        for _ in 0..2000 {
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
+            let Some(c) = cars.first() else { return };
+            assert!(c.seg >= seg, "progress never goes back");
+            seg = c.seg;
+        }
+        panic!("never arrived");
     }
 
     #[test]
     fn congestion_slows_a_car_down() {
-        let (mut free, mut jam) = (journey(2.0), journey(2.0));
-        advance(&mut free, 1.0, |_| 1.0);
-        advance(&mut jam, 1.0, |_| 3.0);
-        assert!((free.along - 3.0).abs() < 1e-4 && (jam.along - 1.0).abs() < 1e-4);
+        let (mut free, mut jam) = (vec![journey(2.0)], vec![journey(2.0)]);
+        for _ in 0..20 {
+            follow_step(&mut free, 0.05, |_| 1.0, |_| false);
+            follow_step(&mut jam, 0.05, |_| 3.0, |_| false);
+        }
+        assert!(free[0].along > jam[0].along + 0.5, "{} vs {}", free[0].along, jam[0].along);
     }
 
     #[test]
     fn cars_queue_behind_a_slow_leader_and_never_overlap() {
-        let mut cars: Vec<Journey> = (0..6).map(|i| { let mut j = journey(4.0); j.along = i as f32 * 2.5; j }).collect();
-        cars[5].v = 0.0;
-        // the leader crawls (congestion x20); the followers must stack up behind it
+        let mut cars: Vec<Journey> = (0..6).map(|i| at(4.0, i as f32 * 1.9)).collect();
         for _ in 0..600 {
-            let lead = cars.len() - 1;
-            follow_step(&mut cars, 0.05, |e| if e == 99 { 1.0 } else { 1.0 }, |_| false);
-            let _ = lead;
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
             if cars.len() < 6 { break; }
-            cars.sort_by(|a, b| a.along.total_cmp(&b.along));
-            for w in cars.windows(2) {
-                if w[0].seg == w[1].seg {
-                    assert!(w[1].along - w[0].along >= CAR_LEN - 1e-3, "overlap {} {}", w[0].along, w[1].along);
+            for i in 0..cars.len() {
+                for k in i + 1..cars.len() {
+                    let d = cars[i].pos.distance(cars[k].pos);
+                    assert!(d >= CAR_LEN - 1e-3, "overlap {d}");
                 }
             }
         }
@@ -670,16 +807,12 @@ mod tests {
 
     #[test]
     fn a_car_brakes_for_a_stopped_leader() {
-        let mut cars = vec![journey(4.0), journey(4.0)];
-        cars[0].along = 2.0;
-        cars[1].along = 8.0;
+        let mut cars = vec![at(4.0, 2.0), at(4.0, 8.0)];
         for _ in 0..200 {
             follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
-            if cars.len() < 2 { return; }
-            cars[1].v = 0.0;
-            cars[1].along = 8.0; // pinned stopped
+            cars[1] = at(4.0, 8.0); // pinned stopped
         }
-        assert!(cars[0].along <= 8.0 - CAR_LEN, "stopped behind, got {}", cars[0].along);
+        assert!(cars[0].pos.x <= 8.0 - CAR_LEN, "stopped behind, got {}", cars[0].pos.x);
     }
 
     /// Headless: cars from four arms through one shared junction, plus a straight-through queue, for 60 s. No two cars
@@ -696,20 +829,20 @@ mod tests {
                     let out = dirs[(k + 1 + step / 15 % 3) % 4];
                     let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot: 0 });
+                        cars.push(Journey::new(trip, false, 0));
                         spawned += 1;
                     }
                 }
             }
             follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
-            for left in [false, true] {
+            for _side in [false, true] {
                 for i in 0..cars.len() {
                     for j in i + 1..cars.len() {
                         let (a, b) = (&cars[i], &cars[j]);
+                        let d = a.pos.distance(b.pos);
                         if lane_key(a) == lane_key(b) {
-                            assert!((a.along - b.along).abs() >= CAR_LEN - 1e-3, "same-lane overlap at step {step}");
+                            assert!(d >= CAR_LEN - 0.1, "same-lane overlap ({d}) at step {step}");
                         }
-                        let d = journey_pose(a, left).0.distance(journey_pose(b, left).0);
                         assert!(d >= 0.6, "cars {i},{j} overlap ({d}) at step {step}");
                     }
                 }
@@ -748,7 +881,7 @@ mod tests {
                     let mut trip = trip;
                     ring_trip(&mut trip, &rings, true);
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot: 0 });
+                        cars.push(Journey::new(trip, false, 0));
                     }
                 }
             }
@@ -764,7 +897,7 @@ mod tests {
             }
             for i in 0..cars.len() {
                 for j in i + 1..cars.len() {
-                    let d = journey_pose(&cars[i], false).0.distance(journey_pose(&cars[j], false).0);
+                    let d = cars[i].pos.distance(cars[j].pos);
                     assert!(d >= 0.6, "overlap ({d}) at step {step}");
                 }
             }
@@ -794,8 +927,8 @@ mod tests {
 
     #[test]
     fn left_hand_driving_flips_the_lane_side() {
-        let j = journey(2.0);
-        assert!(journey_pose(&j, false).0.y > 0.0 && journey_pose(&j, true).0.y < 0.0);
+        let t = journey(2.0).trip;
+        assert!(Journey::new(t.clone(), false, 0).pos.y > 0.0 && Journey::new(t, true, 0).pos.y < 0.0);
     }
 }
 
