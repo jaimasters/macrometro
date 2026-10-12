@@ -18,34 +18,33 @@ fn two() -> EconomyState {
 fn next_budget_deterministic() {
     let s = two();
     let cards = [(A, card(0.7)), (B, card(0.4))];
-    assert_eq!(next_budget(&s, &cards, 0.6), next_budget(&s, &cards, 0.6));
+    assert_eq!(next_budget(&s, &cards, 0.6, 0.0), next_budget(&s, &cards, 0.6, 0.0));
     // insertion order of agencies must not matter
     let mut s2 = EconomyState::new(EconomyParams::default());
     s2.add_agency(B, 0.5);
     s2.add_agency(A, 0.5);
-    assert_eq!(next_budget(&s, &cards, 0.6), next_budget(&s2, &cards, 0.6));
+    assert_eq!(next_budget(&s, &cards, 0.6, 0.0), next_budget(&s2, &cards, 0.6, 0.0));
 }
 
 #[test]
 fn better_performer_larger_share() {
-    let b = next_budget(&two(), &[(A, card(0.8)), (B, card(0.3))], 0.0);
+    let b = next_budget(&two(), &[(A, card(0.8)), (B, card(0.3))], 0.0, 0.0);
     assert!(b.per_agency[&A].amount > b.per_agency[&B].amount);
 }
 
 #[test]
 fn favouritism_concentrates_with_car_share() {
     let cards = [(A, card(0.8)), (B, card(0.3))];
-    let lo = next_budget(&two(), &cards, 0.0);
-    let hi = next_budget(&two(), &cards, 1.0);
+    let lo = next_budget(&two(), &cards, 0.0, 0.0);
+    let hi = next_budget(&two(), &cards, 1.0, 0.0);
     let frac = |b: &Budget| b.per_agency[&A].amount / (b.per_agency[&A].amount + b.per_agency[&B].amount);
     assert!(frac(&hi) > frac(&lo));
 }
 
 #[test]
 fn budget_conserves_total() {
-    let mut s = two();
-    s.underserved = 0.5;
-    let b = next_budget(&s, &[(A, card(0.8)), (B, card(0.3))], 0.4);
+    let b = next_budget(&two(), &[(A, card(0.8)), (B, card(0.3))], 0.4, 100.0);
+    assert_eq!(b.road_reserve, 100.0);
     let sum: f64 = b.per_agency.values().map(|x| x.amount).sum::<f64>() + b.road_reserve;
     assert!((sum - b.total).abs() < 1e-9);
 }
@@ -53,12 +52,13 @@ fn budget_conserves_total() {
 #[test]
 fn road_reserve_competes_with_agency_pool() {
     let cards = [(A, card(0.5)), (B, card(0.5))];
-    let calm = next_budget(&two(), &cards, 0.0);
-    let mut s = two();
-    s.underserved = 1.0;
-    let under = next_budget(&s, &cards, 0.0);
+    let calm = next_budget(&two(), &cards, 0.0, 0.0);
+    let under = next_budget(&two(), &cards, 0.0, 200.0);
     assert_eq!(calm.road_reserve, 0.0);
-    assert!(under.road_reserve > 0.0);
+    assert_eq!(under.road_reserve, 200.0);
+    // demand above the cap is clamped: city never takes more than max_road_reserve of total
+    let huge = next_budget(&two(), &cards, 0.0, 1e9);
+    assert!((huge.road_reserve - huge.total * EconomyParams::default().max_road_reserve).abs() < 1e-9);
     assert!(under.per_agency[&A].amount < calm.per_agency[&A].amount);
 }
 
@@ -66,7 +66,7 @@ fn road_reserve_competes_with_agency_pool() {
 fn earmark_rises_with_car_share() {
     let cards = [(A, card(0.5)), (B, card(0.5))];
     let share = |car| {
-        next_budget(&two(), &cards, car).per_agency[&A]
+        next_budget(&two(), &cards, car, 0.0).per_agency[&A]
             .conditions
             .iter()
             .find(|c| c.category == Category::RoadAdjacent)
@@ -79,7 +79,7 @@ fn earmark_rises_with_car_share() {
 fn with_condition() -> (EconomyState, Budget) {
     let mut s = two();
     s.agencies.get_mut(&A).unwrap().conditions.push(SoftCondition { category: Category::Operations, min_share: 0.5 });
-    let b = next_budget(&s, &[(A, card(0.5)), (B, card(0.5))], 0.0);
+    let b = next_budget(&s, &[(A, card(0.5)), (B, card(0.5))], 0.0, 0.0);
     (s, b)
 }
 
@@ -122,7 +122,7 @@ fn standing_clamped_and_feeds_next_budget() {
     hi.agencies.get_mut(&A).unwrap().standing = 1.0;
     let mut lo = two();
     lo.agencies.get_mut(&A).unwrap().standing = 0.0;
-    assert!(next_budget(&hi, &cards, 0.0).per_agency[&A].amount > next_budget(&lo, &cards, 0.0).per_agency[&A].amount);
+    assert!(next_budget(&hi, &cards, 0.0, 0.0).per_agency[&A].amount > next_budget(&lo, &cards, 0.0, 0.0).per_agency[&A].amount);
 }
 
 #[test]

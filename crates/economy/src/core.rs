@@ -2,9 +2,7 @@
 //! Spec: docs/features/economy/SPEC.md; D-6..D-9; arch: land-acquisition.md.
 use std::collections::BTreeMap;
 
-/// Agency entity key (D-8): no singleton; every player command carries one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AgencyId(pub u32);
+pub use sim_core::AgencyId; // D-8: shared type owned by sim_core.
 
 /// Spend category a soft condition can target ("spend >= X% on Y").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,7 +60,7 @@ impl AgencyState {
 pub struct EconomyParams {
     /// City revenue per period at neutral performance.
     pub base_revenue: f64,
-    /// Max fraction of total the city reserves for its own roads (D-7), reached when underserved == 1.
+    /// Cap on the fraction of total the city may reserve for its own roads (D-7).
     pub max_road_reserve: f64,
     /// Earmark share demanded on RoadAdjacent per unit car_share (favouritism, D-6).
     pub earmark_k: f64,
@@ -84,13 +82,11 @@ impl Default for EconomyParams {
 pub struct EconomyState {
     pub params: EconomyParams,
     pub agencies: BTreeMap<AgencyId, AgencyState>,
-    /// 0..=1: how underserved the city judges its people (from growth's road agency, D-7).
-    pub underserved: f64,
 }
 
 impl EconomyState {
     pub fn new(params: EconomyParams) -> Self {
-        Self { params, agencies: BTreeMap::new(), underserved: 0.0 }
+        Self { params, agencies: BTreeMap::new() }
     }
     pub fn add_agency(&mut self, id: AgencyId, standing: f64) {
         self.agencies.insert(id, AgencyState::new(standing));
@@ -124,10 +120,11 @@ fn with_earmark(mut c: Vec<SoftCondition>, share: f64) -> Vec<SoftCondition> {
 }
 
 /// Deterministic budget for the next period (D-6, D-7, D-8). Pure: BTreeMap iteration, fixed op order.
-/// total = base*(0.5 + 0.5*mean_perf + 0.5*mean_standing); road_reserve = total*max_reserve*underserved;
+/// total = base*(0.5 + 0.5*mean_perf + 0.5*mean_standing); road_reserve = min(road_demand, total*max_road_reserve)
+/// where `road_demand` is growth::AgencyOutput::road_reserve (cost of pending city road plans);
 /// the rest is split by (perf+eps)^(1+car_share) * (0.5+standing). Car-dependent cities (car_share up)
 /// concentrate funds on the favoured performer and attach RoadAdjacent earmarks.
-pub fn next_budget(s: &EconomyState, cards: &[(AgencyId, Scorecard)], car_share: f64) -> Budget {
+pub fn next_budget(s: &EconomyState, cards: &[(AgencyId, Scorecard)], car_share: f64, road_demand: f64) -> Budget {
     let p = &s.params;
     let car = car_share.clamp(0.0, 1.0);
     let perf = |id: &AgencyId| cards.iter().find(|(a, _)| a == id).map_or(0.0, |(_, c)| c.performance());
@@ -135,7 +132,7 @@ pub fn next_budget(s: &EconomyState, cards: &[(AgencyId, Scorecard)], car_share:
     let mean_perf = s.agencies.keys().map(perf).sum::<f64>() / n;
     let mean_standing = s.agencies.values().map(|a| a.standing).sum::<f64>() / n;
     let total = p.base_revenue * (0.5 + 0.5 * mean_perf + 0.5 * mean_standing);
-    let road_reserve = total * p.max_road_reserve * s.underserved.clamp(0.0, 1.0);
+    let road_reserve = road_demand.max(0.0).min(total * p.max_road_reserve);
     let pool = total - road_reserve;
     let weights: Vec<f64> =
         s.agencies.iter().map(|(id, a)| (perf(id) + p.eps).powf(1.0 + car) * (0.5 + a.standing)).collect();

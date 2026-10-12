@@ -23,6 +23,10 @@ pub struct Scorecards(pub Vec<(AgencyId, Scorecard)>);
 #[derive(Resource, Default)]
 pub struct CarShare(pub f64);
 
+/// Cost of pending city road plans (growth::AgencyOutput::road_reserve); competes with agency budgets.
+#[derive(Resource, Default)]
+pub struct RoadDemand(pub f64);
+
 /// Budget issued for the current period.
 #[derive(Resource, Default)]
 pub struct CurrentBudget(pub Option<Budget>);
@@ -49,6 +53,7 @@ impl Plugin for EconomyPlugin {
             .insert_resource(PeriodClock { ticks: 0, period: 100 })
             .init_resource::<Scorecards>()
             .init_resource::<CarShare>()
+            .init_resource::<RoadDemand>()
             .init_resource::<CurrentBudget>()
             .init_resource::<SpendQueue>()
             .init_resource::<SpendErrors>()
@@ -69,6 +74,7 @@ fn period_system(
     mut eco: ResMut<Economy>,
     cards: Res<Scorecards>,
     car: Res<CarShare>,
+    road: Res<RoadDemand>,
     mut clock: ResMut<PeriodClock>,
     mut budget: ResMut<CurrentBudget>,
 ) {
@@ -79,7 +85,7 @@ fn period_system(
     if let Some(issued) = &budget.0 {
         eco.0 = close_period(&eco.0, issued);
     }
-    budget.0 = Some(next_budget(&eco.0, &cards.0, car.0));
+    budget.0 = Some(next_budget(&eco.0, &cards.0, car.0, road.0));
 }
 
 #[cfg(test)]
