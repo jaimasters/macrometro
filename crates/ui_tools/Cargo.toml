@@ -6,3 +6,4 @@ description = "Player tools: line drawing, station placement, macro line policie
 
 [dependencies]
 bevy.workspace = true
+sim_core = { path = "../sim_core" }

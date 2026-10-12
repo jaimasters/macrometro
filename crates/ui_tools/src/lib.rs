@@ -7,12 +7,12 @@ mod core;
 pub use core::*;
 
 /// Terrain height lookup (world x,z -> y) used for picking and ghost placement. App overrides it.
-#[derive(Resource, Clone, Copy)]
-pub struct GroundHeight(pub fn(f32, f32) -> f32);
+#[derive(Resource, Clone)]
+pub struct GroundHeight(pub std::sync::Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>);
 
 impl Default for GroundHeight {
     fn default() -> Self {
-        Self(|_, _| 0.0)
+        Self(std::sync::Arc::new(|_, _| 0.0))
     }
 }
 
@@ -37,7 +37,7 @@ impl Plugin for UiToolsPlugin {
             .init_resource::<LineDraft>()
             .init_resource::<GroundHeight>()
             .add_message::<ToolCommand>()
-            .add_message::<RoadPlan>()
+            .add_message::<GhostRoads>()
             .add_systems(Update, (select_tool, finish_line_key, click_tool, spawn_road_ghosts).chain());
     }
 }
@@ -86,15 +86,15 @@ fn click_tool(
     let (camera, cam_tf) = *camera;
     let Some(cursor) = window.cursor_position() else { return };
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
-    let Some(hit) = ray_terrain(ray.origin, *ray.direction, &ground.0) else { return };
+    let Some(hit) = ray_terrain(ray.origin, *ray.direction, &*ground.0) else { return };
     if let Some(c) = click_action(*tool, agency.0, &mut draft, snap(hit)) {
         out.write(c);
     }
 }
 
-/// Replace the ghost set with the latest RoadPlan. Faint, unlit, translucent (D-7: no popups).
+/// Replace the ghost set with the latest GhostRoads. Faint, unlit, translucent (D-7: no popups).
 fn spawn_road_ghosts(
-    mut plans: MessageReader<RoadPlan>,
+    mut plans: MessageReader<GhostRoads>,
     old: Query<Entity, With<RoadGhost>>,
     ground: Res<GroundHeight>,
     mut commands: Commands,
@@ -158,7 +158,7 @@ mod plugin_tests {
     #[test]
     fn road_plan_spawns_then_replaces_ghosts() {
         let mut app = app();
-        let seg = |n: usize| RoadPlan { segments: (0..n).map(|i| (Vec2::ZERO, Vec2::new(10.0 + i as f32, 0.0))).collect() };
+        let seg = |n: usize| GhostRoads { segments: (0..n).map(|i| (Vec2::ZERO, Vec2::new(10.0 + i as f32, 0.0))).collect() };
         app.world_mut().write_message(seg(3));
         app.update();
         let count = |app: &mut App| app.world_mut().query::<&RoadGhost>().iter(app.world()).count();

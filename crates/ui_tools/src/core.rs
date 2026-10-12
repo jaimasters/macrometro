@@ -2,9 +2,8 @@
 //! No ECS here except the `Message` derives; everything is unit-tested below.
 use bevy::prelude::*;
 
-/// Acting agency (D-8). Every player command carries one so the sim stays input-driven.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct AgencyId(pub u16);
+/// Acting agency (D-8): the shared sim_core type. Every player command carries one.
+pub use sim_core::AgencyId;
 
 /// Which tool the player has selected.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,41 +28,12 @@ pub struct ToolCommand {
     pub action: ToolAction,
 }
 
-/// Planned (not yet built) road segments to draw as faint ghosts (D-7).
-/// ponytail: stub until `growth` publishes its own RoadPlan; swap the type then.
+/// Faint planned-road segments (world x,z pairs) to draw as ghosts (D-7). Each message is the FULL
+/// current set: the renderer replaces what it drew. App converts growth::RoadPlan (zone-level, no
+/// geometry) into segments.
 #[derive(Message, Debug, Clone, PartialEq, Default)]
-pub struct RoadPlan {
+pub struct GhostRoads {
     pub segments: Vec<(Vec2, Vec2)>,
-}
-
-/// Wire kind for `sim_core::Command::Custom` carrying a PlaceStation.
-pub const KIND_PLACE_STATION: u32 = 0x5701;
-
-const I24: i64 = 1 << 23;
-
-impl ToolCommand {
-    /// Pack into `Command::Custom(kind, arg)`. Only PlaceStation is encodable today
-    /// (sim_core::Command is Copy with no payload room; see report for the needed change).
-    pub fn encode(&self) -> Option<(u32, i64)> {
-        let ToolAction::PlaceStation { cell } = &self.action else { return None };
-        let (x, z) = (cell.x as i64, cell.y as i64);
-        if !(-I24..I24).contains(&x) || !(-I24..I24).contains(&z) {
-            return None;
-        }
-        let arg = ((self.agency.0 as i64) << 48) | ((x & 0xFF_FFFF) << 24) | (z & 0xFF_FFFF);
-        Some((KIND_PLACE_STATION, arg))
-    }
-
-    pub fn decode(kind: u32, arg: i64) -> Option<Self> {
-        if kind != KIND_PLACE_STATION {
-            return None;
-        }
-        let sext = |v: i64| (v << 40) >> 40; // sign-extend 24 bits
-        Some(Self {
-            agency: AgencyId((arg >> 48) as u16),
-            action: ToolAction::PlaceStation { cell: IVec2::new(sext(arg >> 24) as i32, sext(arg) as i32) },
-        })
-    }
 }
 
 /// March a ray until it dips below `ground(x,z)`, then bisect. Returns the world (x,z) hit.
@@ -137,18 +107,6 @@ pub fn segment_transform(a: Vec2, b: Vec2, y: f32, width: f32, thickness: f32) -
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encode_roundtrip_incl_negatives() {
-        for cell in [IVec2::new(5, 9), IVec2::new(-300, 77), IVec2::new(-8_000_000, 8_000_000), IVec2::ZERO] {
-            let c = ToolCommand { agency: AgencyId(3), action: ToolAction::PlaceStation { cell } };
-            let (k, a) = c.encode().unwrap();
-            assert_eq!(ToolCommand::decode(k, a), Some(c));
-        }
-        let line = ToolCommand { agency: AgencyId(1), action: ToolAction::DrawLine { cells: vec![] } };
-        assert!(line.encode().is_none());
-        assert!(ToolCommand::decode(1, 0).is_none());
-    }
 
     #[test]
     fn ray_hits_flat_and_ramp() {
