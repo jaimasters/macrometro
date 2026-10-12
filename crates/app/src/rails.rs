@@ -16,7 +16,11 @@ const Y_TRAIN: f32 = 4.5;
 const LINE_WIDTH: f32 = 3.2;
 /// Below this view height lines draw as their individual rails.
 pub const RAIL_VIEW: f32 = 90.0;
-const RAIL_W: f32 = 0.7;
+const RAIL_W: f32 = 0.16;
+/// Half the distance between a track's two rails; sleepers run a little wider.
+const RAIL_GAP: f32 = 0.3;
+const SLEEPER_STEP: f32 = 1.4;
+const SLEEPER_W: f32 = 0.35;
 pub const RAIL_PITCH: f32 = 1.1;
 const CAPSULE_LEN: f32 = 7.5;
 
@@ -179,7 +183,20 @@ fn spawn_line(commands: &mut Commands, vis: &Visuals, rec: &LineRec, tracks: &[u
         stroke(commands, vis, rec.id, sub, n as f32 * RAIL_PITCH + 0.9, Y_LINE + 0.05, &vis.beds[k], true);
         for r in 0..n {
             let off = (r as f32 - (n as f32 - 1.0) / 2.0) * RAIL_PITCH;
-            stroke(commands, vis, rec.id, &offset_path(sub, off), RAIL_W, Y_LINE + 0.1, &vis.lines[k], true);
+            let centre = offset_path(sub, off);
+            // two rails per track, and sleepers across them
+            for side in [-RAIL_GAP, RAIL_GAP] {
+                stroke(commands, vis, rec.id, &offset_path(&centre, side), RAIL_W, Y_LINE + 0.1, &vis.lines[k], true);
+            }
+            let total = path_len(&centre);
+            let mut d = SLEEPER_STEP / 2.0;
+            while d < total {
+                let (p, h) = point_at(&centre, d);
+                let n = left(h) * RAIL_GAP * 1.5;
+                let mut e = commands.spawn((LineVisual(rec.id), Mesh3d(vis.cuboid.clone()), MeshMaterial3d(vis.beds[k].clone()), segment_transform(p - n, p + n, Y_LINE + 0.07, SLEEPER_W, 0.1)));
+                e.insert((Detail, Visibility::Hidden));
+                d += SLEEPER_STEP;
+            }
         }
     }
 }
