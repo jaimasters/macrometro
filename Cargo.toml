@@ -3,8 +3,18 @@ name = "macrometro"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
 bevy = "0.20.0"
+
+[dependencies]
+bevy.workspace = true
+app = { path = "crates/app" }
 
 [profile.dev]
 opt-level = 1

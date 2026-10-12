@@ -1,0 +1,1 @@
+Verify $ARGUMENTS: run `cargo check --workspace`, `cargo test -p $ARGUMENTS`, `cargo clippy -p $ARGUMENTS -- -D warnings`, and wasm check `cargo check -p $ARGUMENTS --target wasm32-unknown-unknown`. Every SPEC acceptance test must exist and pass. Write result + date to STATUS.md (state: verified or failing with reason).

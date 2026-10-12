@@ -1,0 +1,8 @@
+[package]
+name = "world_gen"
+version = "0.1.0"
+edition.workspace = true
+description = "Generative, infinitely scaling world: chunk addressing, terrain, linked cities."
+
+[dependencies]
+bevy.workspace = true

@@ -1,3 +1,4 @@
+// Placeholder starter scene; replaced once MVP scope is agreed (docs/OPEN_QUESTIONS.md).
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -5,7 +6,7 @@ struct Player;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, app::MacrometroPlugins))
         .add_systems(Startup, setup)
         .add_systems(Update, move_player)
         .run();

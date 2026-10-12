@@ -1,0 +1,16 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition.workspace = true
+description = "Composes all feature plugins into the game."
+
+[dependencies]
+bevy.workspace = true
+sim_core = { path = "../sim_core" }
+world_gen = { path = "../world_gen" }
+transit = { path = "../transit" }
+growth = { path = "../growth" }
+economy = { path = "../economy" }
+render_budget = { path = "../render_budget" }
+save = { path = "../save" }
+ui_tools = { path = "../ui_tools" }

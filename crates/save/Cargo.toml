@@ -1,0 +1,8 @@
+[package]
+name = "save"
+version = "0.1.0"
+edition.workspace = true
+description = "Versioned world save format, loader and seeded scenario generator."
+
+[dependencies]
+bevy.workspace = true
