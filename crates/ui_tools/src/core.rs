@@ -26,6 +26,8 @@ pub enum ToolAction {
     ExtendLine { line: usize, from: IVec2, to: IVec2 },
     /// One more platform at the station on `cell`.
     AddPlatform { cell: IVec2 },
+    /// One more track on the rail segment between two stations (1 -> 2 -> 4).
+    UpgradeTracks { a: IVec2, b: IVec2 },
 }
 
 /// A player command, always tagged with the acting agency (D-8).

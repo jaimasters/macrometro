@@ -9,7 +9,7 @@ use crate::stations::SelectedStation;
 use crate::zones::{GrowthLink, ZoneLayout};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use transit::{TransitNet, MAX_PLATFORMS};
+use transit::{Edge, TransitNet, MAX_PLATFORMS};
 use ui_tools::{ActiveAgency, ActiveTool, ExtendState, LineExtend, Stations, ToolAction, ToolCommand};
 
 const INK: Color = Color::srgb(0.12, 0.13, 0.16);
@@ -28,6 +28,8 @@ enum MenuAction {
     Extend(usize),
     NewLine,
     Platform,
+    /// +1 track on the segment to the neighbouring station on this cell.
+    Track(IVec2),
     Delete,
     Close,
 }
@@ -49,14 +51,30 @@ pub fn lines_serving(lines: &Lines, cell: IVec2) -> Vec<usize> {
     lines.all.iter().filter(|l| l.cells.contains(&cell)).map(|l| l.id).collect()
 }
 
-/// Menu rows for a station: (action, label) in display order.
-pub fn menu_actions(lines: &Lines, platforms: u8, cell: IVec2) -> Vec<(MenuActionKind, String)> {
+/// Stations next to `cell` on any line (the far ends of its segments), in line order, no repeats.
+pub fn neighbours(lines: &Lines, cell: IVec2) -> Vec<IVec2> {
+    let mut out: Vec<IVec2> = vec![];
+    for l in &lines.all {
+        let Some(i) = l.cells.iter().position(|c| *c == cell) else { continue };
+        for n in [i.checked_sub(1).map(|j| l.cells[j]), l.cells.get(i + 1).copied()].into_iter().flatten() {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// Menu rows for a station: (action, label) in display order. `tracks` = (neighbour, label) for each segment
+/// that can still take a track (priced by the caller from the transit net).
+pub fn menu_actions(lines: &Lines, platforms: u8, cell: IVec2, tracks: &[(IVec2, String)]) -> Vec<(MenuActionKind, String)> {
     let mut v: Vec<(MenuActionKind, String)> =
         lines.terminating_at(cell).into_iter().map(|l| (MenuActionKind::Extend(l), format!("Extend line {} from here", l + 1))).collect();
     v.push((MenuActionKind::NewLine, "New line from here".into()));
     if platforms < MAX_PLATFORMS {
         v.push((MenuActionKind::Platform, format!("+ Platform  ({PLATFORM_COST:.0})")));
     }
+    v.extend(tracks.iter().map(|(n, label)| (MenuActionKind::Track(*n), label.clone())));
     v.push((MenuActionKind::Delete, "Delete station".into()));
     v
 }
@@ -67,6 +85,7 @@ pub enum MenuActionKind {
     Extend(usize),
     NewLine,
     Platform,
+    Track(IVec2),
     Delete,
 }
 
@@ -76,6 +95,7 @@ impl From<MenuActionKind> for MenuAction {
             MenuActionKind::Extend(l) => MenuAction::Extend(l),
             MenuActionKind::NewLine => MenuAction::NewLine,
             MenuActionKind::Platform => MenuAction::Platform,
+            MenuActionKind::Track(n) => MenuAction::Track(n),
             MenuActionKind::Delete => MenuAction::Delete,
         }
     }
@@ -145,7 +165,16 @@ fn rebuild_menu(
                 }
             });
             m.spawn(label(format!("Platforms {platforms}"), 13.0, MUTED));
-            for (k, text) in menu_actions(&lines, platforms, cell) {
+            let tracks: Vec<(IVec2, String)> = neighbours(&lines, cell)
+                .into_iter()
+                .filter_map(|n| {
+                    let (a, b) = (map.node(cell)?, map.node(n)?);
+                    let cost = Edge::track_cost_between(&net.0, a, b)?;
+                    let now = net.0.rail_edge(a, b).map_or(1, |i| net.0.edges[i].tracks);
+                    Some((n, format!("+ Track to {}  ({cost:.0}, now {now})", station_name(seed.0, &layout.0, n.as_vec2()))))
+                })
+                .collect();
+            for (k, text) in menu_actions(&lines, platforms, cell, &tracks) {
                 button(m, k.into(), &text);
             }
         });
@@ -230,6 +259,9 @@ fn menu_clicks(
         MenuAction::Platform => {
             out.write(ToolCommand { agency: agency.0, action: ToolAction::AddPlatform { cell } });
         }
+        MenuAction::Track(other) => {
+            out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeTracks { a: cell, b: other } });
+        }
         MenuAction::Delete => {
             stations.0.retain(|s| *s != cell);
             out.write(ToolCommand { agency: agency.0, action: ToolAction::DeleteStation { cell } });
@@ -249,11 +281,14 @@ mod tests {
         let (a, b, c) = (IVec2::new(0, 0), IVec2::new(40, 0), IVec2::new(80, 0));
         let mut lines = Lines::default();
         lines.add(vec![a, b, c]);
-        let labels = |cell, plats| menu_actions(&lines, plats, cell).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        let labels = |cell, plats| menu_actions(&lines, plats, cell, &[]).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
         assert_eq!(labels(a, 1), vec![MenuActionKind::Extend(0), MenuActionKind::NewLine, MenuActionKind::Platform, MenuActionKind::Delete]);
         assert_eq!(labels(b, 1), vec![MenuActionKind::NewLine, MenuActionKind::Platform, MenuActionKind::Delete], "mid-line stop: no extend");
         assert!(!labels(c, MAX_PLATFORMS).contains(&MenuActionKind::Platform));
         assert_eq!(lines_serving(&lines, b), vec![0]);
+        assert_eq!(neighbours(&lines, b), vec![a, c]);
+        let row = menu_actions(&lines, 1, b, &[(c, "+ Track".into())]);
+        assert!(row.iter().any(|(k, _)| *k == MenuActionKind::Track(c)));
         assert!(lines_serving(&lines, IVec2::new(1, 1)).is_empty());
     }
 

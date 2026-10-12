@@ -60,11 +60,15 @@ fn one_track_rejects_the_opposite_direction() {
     assert!(net.apply(&line(vec![0, 1, 2, 0])).is_ok());
     // upgrading to 2 tracks makes the reverse legal
     for i in 0..3 {
-        net.apply(&cmd(TransitAction::UpgradeTracks(i))).unwrap();
+        let (a, b) = [(0, 1), (1, 2), (2, 0)][i];
+        net.apply(&cmd(TransitAction::UpgradeTracks { a: NodeId(a), b: NodeId(b) })).unwrap();
     }
     assert!(net.apply(&line(vec![0, 2, 1, 0])).is_ok());
-    assert!(net.apply(&cmd(TransitAction::UpgradeTracks(0))).is_ok()); // 2 -> 4
-    assert!(matches!(net.apply(&cmd(TransitAction::UpgradeTracks(0))), Err(TransitError::MaxTracks(0))));
+    let up = cmd(TransitAction::UpgradeTracks { a: NodeId(0), b: NodeId(1) });
+    assert!(net.apply(&up).is_ok()); // 2 -> 4
+    assert!(matches!(net.apply(&up), Err(TransitError::MaxTracks(0))));
+    assert_eq!(net.edges[0].upgrade_cost(), None);
+    assert_eq!(net.edges[1].upgrade_cost(), Some(30.0 * TRACK_COST_PER_LEN * 2.0));
 }
 
 #[test]

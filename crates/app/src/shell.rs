@@ -7,21 +7,17 @@ use economy::{Category, CurrentBudget, Economy, SpendCommand, SpendQueue};
 use sim_core::AgencyId;
 use sound::{SoundEvent, SoundKind};
 use std::collections::HashMap;
-use transit::{EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands};
-use ui_tools::{octilinear, path_len, route, segment_transform, ActiveAgency, ToolAction, ToolCommand};
+use transit::{Edge, EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands, TransitNet};
+use ui_tools::{octilinear, path_len, route, ActiveAgency, ToolAction, ToolCommand};
 
 /// The local player's agency (agency 0 is the city).
 pub const PLAYER: AgencyId = AgencyId(1);
-const TRAIN_SPEED: f32 = 14.0;
 const STATION_COST: f64 = 50.0;
 const COST_PER_LEN: f64 = 2.0;
 /// Price of one extra platform (B2 station menu; C1 trains need platforms to enter).
 pub const PLATFORM_COST: f64 = 40.0;
 
 // Flat layer stack (world y): land 0 < ghosts 0.5 < zones 1 < lines 2 < preview 2.6 < station outline 3 < station 3.3 < train 4.5.
-const Y_LINE: f32 = 2.0;
-const Y_TRAIN: f32 = 4.5;
-const LINE_WIDTH: f32 = 3.2;
 pub const LINE_COLOURS: [(f32, f32, f32); 5] =
     [(0.15, 0.45, 0.90), (0.88, 0.25, 0.30), (0.10, 0.62, 0.58), (0.90, 0.72, 0.10), (0.55, 0.35, 0.75)];
 
@@ -96,6 +92,11 @@ pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> 
         ToolAction::PlaceStation { cell } => {
             node(*cell, &mut out, &mut fresh);
         }
+        ToolAction::UpgradeTracks { a, b } => {
+            if let (Some(na), Some(nb)) = (map.by_cell.get(a).copied(), map.by_cell.get(b).copied()) {
+                out.push(TransitCommand { agency, action: TransitAction::UpgradeTracks { a: na, b: nb } });
+            }
+        }
         ToolAction::AddPlatform { .. } => {
             if let Some(n) = known {
                 out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
@@ -119,15 +120,6 @@ pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> 
         }
     }
     (out, fresh)
-}
-
-#[derive(Resource)]
-struct ToolVisuals {
-    cylinder: Handle<Mesh>,
-    cuboid: Handle<Mesh>,
-    capsule: Handle<Mesh>,
-    train: Handle<StandardMaterial>,
-    lines: Vec<Handle<StandardMaterial>>,
 }
 
 /// Player lines as station cells (mirrors transit; used to redraw after deletions).
@@ -183,38 +175,6 @@ impl Lines {
     }
 }
 
-/// Everything drawn for one line (strokes, joints, trains); despawned on change.
-#[derive(Component)]
-struct LineVisual(usize);
-
-/// A train shuttling back and forth along a line's route (visual marker; not simulated load).
-#[derive(Component)]
-struct Train {
-    path: Vec<Vec2>,
-    dist: f32,
-    line: usize,
-    /// Completed end-to-end legs, to fire an arrival sound at each terminus.
-    leg: i64,
-}
-
-/// Position after travelling `d` along `path`, bouncing at both ends.
-pub fn ping_pong(path: &[Vec2], d: f32) -> Vec2 {
-    let total: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
-    if path.is_empty() || total <= 0.0 {
-        return path.first().copied().unwrap_or(Vec2::ZERO);
-    }
-    let m = d.rem_euclid(2.0 * total);
-    let mut rest = if m > total { 2.0 * total - m } else { m };
-    for w in path.windows(2) {
-        let l = w[0].distance(w[1]);
-        if rest <= l {
-            return w[0].lerp(w[1], rest / l.max(1e-6));
-        }
-        rest -= l;
-    }
-    *path.last().unwrap()
-}
-
 pub struct ShellPlugin;
 
 impl Plugin for ShellPlugin {
@@ -226,51 +186,7 @@ impl Plugin for ShellPlugin {
         app.insert_resource(StationMap::new(first_free))
             .init_resource::<Lines>()
             .insert_resource(ActiveAgency(PLAYER))
-            .add_systems(Startup, setup_visuals)
-            .add_systems(Update, (apply_tool_commands, move_trains));
-    }
-}
-
-fn setup_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>) {
-    let mut flat = |c: Color| mats.add(StandardMaterial { base_color: c, unlit: true, ..default() });
-    commands.insert_resource(ToolVisuals {
-        cylinder: meshes.add(Cylinder::new(1.0, 1.0)),
-        cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        capsule: meshes.add(Capsule3d::new(2.0, 3.5)),
-        train: flat(Color::srgb(0.98, 0.98, 0.98)),
-        lines: LINE_COLOURS.iter().map(|&(r, g, b)| flat(Color::srgb(r, g, b))).collect(),
-    });
-}
-
-fn spawn_line(commands: &mut Commands, vis: &ToolVisuals, rec: &LineRec) {
-    let mat = vis.lines[rec.id % vis.lines.len()].clone();
-    let path = route(&rec.cells);
-    for w in path.windows(2) {
-        commands.spawn((
-            LineVisual(rec.id),
-            Mesh3d(vis.cuboid.clone()),
-            MeshMaterial3d(mat.clone()),
-            segment_transform(w[0], w[1], Y_LINE, LINE_WIDTH, 0.3),
-        ));
-    }
-    for p in &path {
-        // round joints so bends are clean
-        commands.spawn((
-            LineVisual(rec.id),
-            Mesh3d(vis.cylinder.clone()),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_xyz(p.x, Y_LINE, p.y).with_scale(Vec3::new(LINE_WIDTH / 2.0, 0.3, LINE_WIDTH / 2.0)),
-        ));
-    }
-    let len = path_len(&path);
-    for dist in [0.0, len] {
-        commands.spawn((
-            LineVisual(rec.id),
-            Train { path: path.clone(), dist, line: rec.id, leg: 0 },
-            Mesh3d(vis.capsule.clone()),
-            MeshMaterial3d(vis.train.clone()),
-            Transform::from_xyz(path[0].x, Y_TRAIN, path[0].y),
-        ));
+            .add_systems(Update, apply_tool_commands);
     }
 }
 
@@ -282,28 +198,26 @@ fn apply_tool_commands(
     mut lines: ResMut<Lines>,
     layout: Res<ZoneLayout>,
     cam: Option<Res<MapCam>>,
-    vis: Option<Res<ToolVisuals>>,
+    net: Res<TransitNet>,
     mut spend: ResMut<SpendQueue>,
     mut sound: MessageWriter<SoundEvent>,
-    line_visuals: Query<(Entity, &LineVisual)>,
-    mut commands: Commands,
 ) {
-    let Some(vis) = vis else { return };
     let centres: Vec<Vec2> = layout.0.iter().map(|g| g.center).collect();
     let pan = |p: Vec2| cam.as_ref().map_or(0.0, |c| ((p.x - c.focus.x) / c.view_h).clamp(-1.0, 1.0));
     for c in cmds.read() {
+        // a track upgrade is priced from the segment itself; a maxed or unknown segment is refused outright
+        let track_cost = if let ToolAction::UpgradeTracks { a, b } = &c.action {
+            match map.node(*a).zip(map.node(*b)).and_then(|(na, nb)| Edge::track_cost_between(&net.0, na, nb)) {
+                Some(cost) => cost,
+                None => continue,
+            }
+        } else {
+            0.0
+        };
         let (tc, fresh) = to_transit(c, &mut map, &centres);
         transit.0.extend(tc);
         if let ToolAction::DeleteStation { cell } = &c.action {
-            let changed = lines.remove_station(*cell);
-            for (e, v) in &line_visuals {
-                if changed.contains(&v.0) {
-                    commands.entity(e).despawn();
-                }
-            }
-            for rec in lines.all.iter().filter(|l| changed.contains(&l.id)) {
-                spawn_line(&mut commands, &vis, rec);
-            }
+            lines.remove_station(*cell);
             continue;
         }
         let route_len = match &c.action {
@@ -312,7 +226,7 @@ fn apply_tool_commands(
             _ => 0.0,
         };
         let platform = if matches!(c.action, ToolAction::AddPlatform { .. }) { PLATFORM_COST } else { 0.0 };
-        let amount = STATION_COST * fresh.len() as f64 + COST_PER_LEN * route_len + platform;
+        let amount = STATION_COST * fresh.len() as f64 + COST_PER_LEN * route_len + platform + track_cost;
         if amount > 0.0 {
             spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount });
         }
@@ -323,48 +237,17 @@ fn apply_tool_commands(
         if let ToolAction::AddPlatform { cell } = &c.action {
             sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: cell.x / 4 + cell.y / 4 + 2, pan: pan(cell.as_vec2()) });
         }
+        if let ToolAction::UpgradeTracks { a, .. } = &c.action {
+            sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: a.x / 4 + a.y / 4 + 4, pan: pan(a.as_vec2()) });
+        }
         if let ToolAction::ExtendLine { line, from, to } = &c.action {
             if lines.extend(*line, *from, *to) {
-                for (e, v) in &line_visuals {
-                    if v.0 == *line {
-                        commands.entity(e).despawn();
-                    }
-                }
-                if let Some(rec) = lines.all.iter().find(|l| l.id == *line) {
-                    spawn_line(&mut commands, &vis, rec);
-                }
                 sound.write(SoundEvent { kind: SoundKind::LineCreated, pitch: *line as i32, pan: pan(to.as_vec2()) });
             }
         }
         if let ToolAction::DrawLine { cells } = &c.action {
             let id = lines.add(cells.clone());
-            let rec = lines.all.last().unwrap().clone();
-            spawn_line(&mut commands, &vis, &rec);
             sound.write(SoundEvent { kind: SoundKind::LineCreated, pitch: id as i32, pan: pan(route(cells)[0]) });
-        }
-    }
-}
-
-fn move_trains(
-    time: Res<Time>,
-    cam: Option<Res<MapCam>>,
-    mut sound: MessageWriter<SoundEvent>,
-    mut q: Query<(&mut Train, &mut Transform)>,
-) {
-    for (mut t, mut tf) in &mut q {
-        t.dist += TRAIN_SPEED * time.delta_secs();
-        let p = ping_pong(&t.path, t.dist);
-        let ahead = ping_pong(&t.path, t.dist + 0.5);
-        let d = ahead - p;
-        tf.translation = Vec3::new(p.x, Y_TRAIN, p.y);
-        // capsule axis (Y) laid along the heading in the XZ plane
-        tf.rotation = Quat::from_rotation_y(-d.y.atan2(d.x)) * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-        let total = path_len(&t.path).max(1.0);
-        let leg = (t.dist / total).floor() as i64;
-        if leg != t.leg {
-            t.leg = leg;
-            let pan = cam.as_ref().map_or(0.0, |c| ((p.x - c.focus.x) / c.view_h).clamp(-1.0, 1.0));
-            sound.write(SoundEvent { kind: SoundKind::TrainArrive, pitch: t.line as i32 * 2 + 1, pan });
         }
     }
 }
@@ -392,13 +275,24 @@ mod tests {
     }
 
     #[test]
-    fn ping_pong_bounces() {
-        let p = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0)];
-        assert_eq!(ping_pong(&p, 5.0), Vec2::new(5.0, 0.0));
-        assert_eq!(ping_pong(&p, 15.0), Vec2::new(10.0, 5.0));
-        assert_eq!(ping_pong(&p, 25.0), Vec2::new(10.0, 5.0));
-        assert_eq!(ping_pong(&p, 40.0), Vec2::ZERO);
-        assert_eq!(ping_pong(&[], 3.0), Vec2::ZERO);
+    fn upgrade_tracks_maps_cells_to_nodes_and_is_priced() {
+        let centres = [Vec2::ZERO];
+        let mut m = StationMap::new(1);
+        let (a, b) = (IVec2::new(0, 12), IVec2::new(40, 12));
+        let mut net = transit::Network::default();
+        net.apply(&TransitCommand { agency: AgencyId(0), action: TransitAction::AddNode }).unwrap();
+        let (v, _) = to_transit(&cmd(1, ToolAction::DrawLine { cells: vec![a, b] }), &mut m, &centres);
+        for t in &v {
+            net.apply(t).unwrap();
+        }
+        let (na, nb) = (m.node(a).unwrap(), m.node(b).unwrap());
+        let before = Edge::track_cost_between(&net, na, nb).unwrap();
+        let (up, _) = to_transit(&cmd(1, ToolAction::UpgradeTracks { a, b }), &mut m, &centres);
+        assert_eq!(up[0].action, TransitAction::UpgradeTracks { a: na, b: nb });
+        net.apply(&up[0]).unwrap();
+        assert_eq!(net.edges.iter().find(|e| e.kind == EdgeKind::Rail).unwrap().tracks, 4);
+        assert_eq!(Edge::track_cost_between(&net, na, nb), None, "maxed out: no further upgrade offered");
+        assert!(before > 0.0);
     }
 
     #[test]

@@ -3,10 +3,11 @@
 //! Pure geometry in `groups`/`crowding_colour`; the ECS part rebuilds station visuals when stations or lines change.
 use crate::camera::MapCam;
 use crate::layout::station_name;
-use crate::shell::{line_colour, Lines};
+use crate::shell::{line_colour, Lines, StationMap};
 use crate::zones::{is_built, GrowthLink, ZoneLayout};
 use bevy::prelude::*;
 use std::collections::HashMap;
+use transit::TransitNet;
 use ui_tools::{route, station_at, ActiveTool, CursorWorld, Stations};
 
 const INK: Color = Color::srgb(0.10, 0.11, 0.14);
@@ -18,9 +19,26 @@ const Y_TRACK: f32 = 3.5;
 const Y_GAUGE: f32 = 3.6;
 /// Labels show only when the view is at least this zoomed in (view height in world units).
 pub const LABEL_VIEW_MAX: f32 = 150.0;
+/// Screen pixels kept free at the bottom for the palette and hint.
+const TOOLBAR_CLEAR: f32 = 130.0;
 /// Stations/platforms are enlarged on zoom-out so they stay readable (1.0 at/below this view height).
 const ZOOM_REF: f32 = 160.0;
 const WIDTH: f32 = 3.6;
+
+/// Width of one platform bar: slimmer when a station has several side by side.
+pub fn platform_width(n: u8) -> f32 {
+    if n <= 1 { WIDTH } else { 2.4 }
+}
+
+/// Distance between neighbouring platform bar centres.
+pub fn platform_pitch(n: u8) -> f32 {
+    platform_width(n) + 1.8
+}
+
+/// Sideways offset of platform `slot` of `n` from the station centre line.
+pub fn platform_offset(slot: u8, n: u8) -> f32 {
+    (slot as f32 - (n as f32 - 1.0) / 2.0) * platform_pitch(n)
+}
 
 /// One platform bar: heading (radians in the XZ plane, folded to [0, pi)) and the lines served along it.
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +192,9 @@ fn select_station(
 fn rebuild(
     stations: Res<Stations>,
     lines: Res<Lines>,
+    net: Res<TransitNet>,
+    map: Res<StationMap>,
+    mut plat_sig: Local<Vec<u8>>,
     mats: Option<Res<Mats>>,
     layout: Res<ZoneLayout>,
     seed: Res<world_gen::WorldSeed>,
@@ -185,9 +206,11 @@ fn rebuild(
     mut commands: Commands,
 ) {
     let Some(mats) = mats else { return };
-    if !(stations.is_changed() || lines.is_changed()) {
+    let sig: Vec<u8> = stations.0.iter().map(|c| map.node(*c).map_or(1, |n| net.0.platform_count(n))).collect();
+    if !(stations.is_changed() || lines.is_changed() || sig != *plat_sig) {
         return;
     }
+    *plat_sig = sig;
     for e in &old {
         commands.entity(e).despawn();
     }
@@ -200,33 +223,35 @@ fn rebuild(
             .spawn((StationRoot(cell), Transform::from_xyz(p.x, 0.0, p.y), Visibility::default()))
             .id();
         let mut kids = vec![];
+        let np = map.node(cell).map_or(1, |n| net.0.platform_count(n));
+        let bw = platform_width(np);
         for g in &gs {
             let a = g.angle;
             let dir = Vec2::new(a.cos(), a.sin());
             let perp = Vec2::new(-dir.y, dir.x);
-            for (w, y, mat) in [(WIDTH + 5.0, Y_RING, mats.ring_hover.clone()), (WIDTH + 1.6, Y_OUTLINE, mats.ink.clone())] {
-                let mesh = stadium(&mut meshes, &mut cache, len + (w - WIDTH), w);
-                let t = pose(Vec3::new(0.0, y, 0.0), a);
-                let mut e = commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat), t));
-                if y == Y_RING {
-                    e.insert((Ring(cell), Visibility::Hidden));
+            // hover/select ring around the whole platform block
+            let block = np as f32 * platform_pitch(np) - 1.8 + (WIDTH - bw);
+            let ring = stadium(&mut meshes, &mut cache, len + 5.0, block.max(bw) + 5.0);
+            kids.push(commands.spawn((Mesh3d(ring), MeshMaterial3d(mats.ring_hover.clone()), pose(Vec3::new(0.0, Y_RING, 0.0), a), Ring(cell), Visibility::Hidden)).id());
+            // one bar per platform, each striped in the serving lines' colours
+            for slot in 0..np {
+                let po = platform_offset(slot, np);
+                let outline = stadium(&mut meshes, &mut cache, len + 1.6, bw + 1.6);
+                kids.push(commands.spawn((Mesh3d(outline), MeshMaterial3d(mats.ink.clone()), pose(Vec3::new(perp.x * po, Y_OUTLINE, perp.y * po), a))).id());
+                let n = g.lines.len().max(1);
+                for k in 0..n {
+                    let sw = bw / n as f32;
+                    let off = po + (k as f32 - (n as f32 - 1.0) / 2.0) * sw;
+                    let mat = match g.lines.get(k) {
+                        Some(&id) => line_mats
+                            .entry(id)
+                            .or_insert_with(|| materials.add(StandardMaterial { base_color: line_colour(id), unlit: true, ..default() }))
+                            .clone(),
+                        None => mats.stub.clone(),
+                    };
+                    let mesh = stadium(&mut meshes, &mut cache, len, sw.max(1.0));
+                    kids.push(commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat), pose(Vec3::new(perp.x * off, Y_FILL, perp.y * off), a))).id());
                 }
-                kids.push(e.id());
-            }
-            // fills: one strip per line, each its line's colour; stub = neutral
-            let n = g.lines.len().max(1);
-            for k in 0..n {
-                let sw = WIDTH / n as f32;
-                let off = (k as f32 - (n as f32 - 1.0) / 2.0) * sw;
-                let mat = match g.lines.get(k) {
-                    Some(&id) => line_mats
-                        .entry(id)
-                        .or_insert_with(|| materials.add(StandardMaterial { base_color: line_colour(id), unlit: true, ..default() }))
-                        .clone(),
-                    None => mats.stub.clone(),
-                };
-                let mesh = stadium(&mut meshes, &mut cache, len, sw.max(1.0));
-                kids.push(commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat), pose(Vec3::new(perp.x * off, Y_FILL, perp.y * off), a))).id());
             }
         }
         // gauge along the first platform: dark track + fill that grows with crowding
@@ -352,8 +377,10 @@ fn place_labels(
     let (Some(cam), Some(camera)) = (cam, camera) else { return };
     let (camera, tf) = *camera;
     let show = cam.view_h <= LABEL_VIEW_MAX;
+    // keep clear of the bottom toolbar + hint
+    let floor = camera.logical_viewport_size().map_or(f32::MAX, |s| s.y - TOOLBAR_CLEAR);
     for (l, mut node, mut v) in &mut q {
-        let pos = camera.world_to_viewport(tf, Vec3::new(l.world.x, 0.0, l.world.y)).ok();
+        let pos = camera.world_to_viewport(tf, Vec3::new(l.world.x, 0.0, l.world.y)).ok().filter(|p| p.y < floor);
         match (show, pos) {
             (true, Some(p)) => {
                 node.left = Val::Px(p.x - 80.0);
@@ -375,6 +402,14 @@ mod tests {
             l.add(c.clone());
         }
         l
+    }
+
+    #[test]
+    fn platform_bars_are_distinct_and_centred() {
+        assert_eq!(platform_offset(0, 1), 0.0);
+        let offs: Vec<f32> = (0..3).map(|i| platform_offset(i, 3)).collect();
+        assert!(offs[0] < offs[1] && offs[1] < offs[2] && (offs[0] + offs[2]).abs() < 1e-6 && offs[1] == 0.0);
+        assert!(offs[1] - offs[0] > platform_width(3), "bars do not touch");
     }
 
     #[test]

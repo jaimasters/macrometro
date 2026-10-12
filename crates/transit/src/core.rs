@@ -77,7 +77,19 @@ pub struct Edge {
     pub crossings: Vec<Crossing>,
 }
 
+/// Price of laying one more track per unit length.
+pub const TRACK_COST_PER_LEN: f64 = 1.5;
+
 impl Edge {
+    /// Cost to go to the next track count (1 -> 2 adds one track, 2 -> 4 adds two); None at the maximum.
+    pub fn upgrade_cost(&self) -> Option<f64> {
+        (self.tracks < MAX_TRACKS).then(|| self.len * TRACK_COST_PER_LEN * self.tracks as f64)
+    }
+
+    pub fn track_cost_between(net: &Network, a: NodeId, b: NodeId) -> Option<f64> {
+        net.rail_edge(a, b).and_then(|i| net.edges[i].upgrade_cost())
+    }
+
     pub fn new(a: NodeId, b: NodeId, len: f64, kind: EdgeKind, owner: AgencyId) -> Self {
         Self { a, b, len, kind, owner, tracks: 2, vcap: f64::INFINITY, crossings: vec![] }
     }
@@ -144,8 +156,8 @@ pub enum TransitAction {
     AddPlatform(NodeId),
     /// A rail edge with explicit track count (1 = one-way a->b), speed cap and crossings.
     AddRail { a: NodeId, b: NodeId, len: f64, tracks: u8, vcap: f64, crossings: Vec<Crossing> },
-    /// Edge index: 1 -> 2 -> 4 tracks.
-    UpgradeTracks(usize),
+    /// The rail edge between two stations: 1 -> 2 -> 4 tracks.
+    UpgradeTracks { a: NodeId, b: NodeId },
     /// Replace a crossing's kind (level -> bridge/underpass).
     UpgradeCrossing { edge: usize, idx: usize, kind: CrossingKind },
     /// Rebuild an edge's curve: new length and speed cap.
@@ -201,7 +213,7 @@ impl Network {
         self.platforms.get(n.0 as usize).copied().unwrap_or(1)
     }
 
-    fn rail_edge(&self, a: NodeId, b: NodeId) -> Option<usize> {
+    pub fn rail_edge(&self, a: NodeId, b: NodeId) -> Option<usize> {
         self.edges.iter().position(|e| e.kind == EdgeKind::Rail && ((e.a, e.b) == (a, b) || (e.a, e.b) == (b, a)))
     }
 
@@ -315,13 +327,14 @@ impl Network {
                 self.edges.push(e);
                 Ok(Applied::Edge(self.edges.len() - 1))
             }
-            TransitAction::UpgradeTracks(i) => {
-                let e = self.edges.get_mut(*i).filter(|e| e.kind == EdgeKind::Rail).ok_or(TransitError::NoEdge(*i))?;
+            TransitAction::UpgradeTracks { a, b } => {
+                let i = self.rail_edge(*a, *b).ok_or(TransitError::NoRailEdge(*a, *b))?;
+                let e = &mut self.edges[i];
                 if e.tracks >= MAX_TRACKS {
-                    return Err(TransitError::MaxTracks(*i));
+                    return Err(TransitError::MaxTracks(i));
                 }
                 e.tracks *= 2;
-                Ok(Applied::Edge(*i))
+                Ok(Applied::Edge(i))
             }
             TransitAction::UpgradeCrossing { edge, idx, kind } => {
                 let cr = self.edges.get_mut(*edge).and_then(|e| e.crossings.get_mut(*idx)).ok_or(TransitError::NoEdge(*edge))?;

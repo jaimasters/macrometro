@@ -421,6 +421,16 @@ impl TrainSim {
         if t.dir > 0 { p } else { r.total - p }
     }
 
+    /// Total route length of `line` (None if the line has no route).
+    pub fn line_total(&self, line: LineId) -> Option<f64> {
+        self.routes.iter().find(|r| r.line == line).map(|r| r.total)
+    }
+
+    /// Track count of the segment the train is on.
+    pub fn tracks_under(&self, net: &Network, t: &Train) -> u8 {
+        net.edges[self.edge_under(t)].tracks
+    }
+
     /// Platform slot (0-based) and station the train occupies while stopped.
     pub fn on_platform(&self, t: &Train) -> Option<(NodeId, u8)> {
         matches!(t.phase, Phase::Dwell(_)).then_some(t.slot).flatten()

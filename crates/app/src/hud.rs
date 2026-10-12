@@ -29,6 +29,9 @@ struct Hint(&'static str);
 
 #[derive(Component)]
 struct HintText;
+/// The hint pill; collapsed when there is nothing to say.
+#[derive(Component)]
+struct HintPanel;
 
 /// Equalizer bars of the sound icon; greyed when muted.
 #[derive(Component)]
@@ -203,6 +206,7 @@ fn spawn_hud(mut commands: Commands) {
         .id();
     let hint = commands
         .spawn((
+            HintPanel,
             Node {
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
                 max_width: Val::Percent(100.0),
@@ -287,17 +291,34 @@ fn update_hint(
     tool: Res<ActiveTool>,
     buttons: Query<(&Hovered, &Hint)>,
     extend: Res<LineExtend>,
+    cam: Option<Res<crate::camera::MapCam>>,
+    mut start: Local<Option<Vec2>>,
+    mut panned: Local<bool>,
+    mut panel: Query<&mut Node, With<HintPanel>>,
     mut q: Query<&mut Text, With<HintText>>,
 ) {
+    if let Some(c) = cam {
+        if *start.get_or_insert(c.focus) != c.focus {
+            *panned = true;
+        }
+    }
     let line = if extend.0.is_some() {
         "Click where the line should extend to. Esc or right-click cancels."
     } else if let Some((_, h)) = buttons.iter().find(|(h, _)| h.get()) {
         h.0
+    } else if *panned && *tool == ActiveTool::Pan {
+        "" // they know how to pan: no more pan hint
     } else if time.elapsed_secs() < WELCOME_SECS && *tool == ActiveTool::Pan {
         "Welcome. Pick Station and click the map twice, then Line and drag between them."
     } else {
         hint_for(*tool)
     };
+    for mut n in &mut panel {
+        let d = if line.is_empty() { Display::None } else { Display::Flex };
+        if n.display != d {
+            n.display = d;
+        }
+    }
     for mut t in &mut q {
         if t.0 != line {
             t.0 = line.to_string();
