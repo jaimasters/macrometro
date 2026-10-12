@@ -75,6 +75,7 @@ Player lines drawn as rails (N thin parallel rails per segment when zoomed in, o
 
 ## crates/app/src/roads.rs
 Road drawing and visible traffic. Built roads are strokes by class (local thin, arterial wider, both thinner
+- const ASPHALT
 - const MAX_CARS
 - const TINT_VIEW
 - fn car_scale

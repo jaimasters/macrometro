@@ -155,11 +155,19 @@ pub fn tint_bucket(vc: f32) -> u8 {
     ((vc.clamp(0.0, 1.6) / 1.6) * (TINT_BUCKETS - 1) as f32).round() as u8
 }
 
+/// One asphalt ramp by road class, light surface street -> darkest interstate (index 2 is reserved for R42 freeways).
+/// Used for edges, roundabout discs and every zoom level; white/yellow markings stay readable on all of it.
+pub const ASPHALT: [(f32, f32, f32); 3] = [(0.62, 0.61, 0.58), (0.44, 0.44, 0.43), (0.27, 0.27, 0.29)];
+fn asphalt(i: usize) -> Color {
+    let (r, g, b) = ASPHALT[i];
+    Color::srgb(r, g, b)
+}
+
 /// Neutral road colour while free-flowing; amber -> red only above ~0.6 v/c. No green: it means residential.
 pub fn tint_colour(bucket: usize) -> Color {
     let vc = bucket as f32 / (TINT_BUCKETS - 1) as f32 * 1.6;
     if vc < 0.6 {
-        return Color::srgb(0.70, 0.68, 0.62);
+        return asphalt(0);
     }
     let k = ((vc - 0.6) / 0.6).min(1.0);
     let (a, r) = ((0.96, 0.66, 0.18), (0.86, 0.18, 0.18));
@@ -451,7 +459,7 @@ fn spawn_roads(
     let rect = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let mut flat = |c: Color| mats.add(StandardMaterial { base_color: c, unlit: true, ..default() });
     let m = RoadMats {
-        base: [flat(Color::srgb(0.70, 0.68, 0.62)), flat(Color::srgb(0.93, 0.90, 0.80))],
+        base: [flat(asphalt(0)), flat(asphalt(1))],
         bridge: flat(Color::srgb(0.98, 0.96, 0.90)),
         tint: (0..TINT_BUCKETS).map(|k| flat(tint_colour(k))).collect(),
     };
@@ -500,7 +508,8 @@ fn spawn_roads(
     for r in rings.values() {
         let e = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].first().copied().unwrap_or(0);
         let at = |rad: f32, y: f32| Transform::from_xyz(r.c.x, y, r.c.y).with_scale(Vec3::new(rad, 0.1, rad));
-        commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(m.base[0].clone()), at(r.r + 1.0, Y_ROAD + 0.03), Visibility::Hidden));
+        let major = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].iter().any(|&k| cp.plan.graph.edges[k].class == RoadClass::Arterial);
+        commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(m.base[major as usize].clone()), at(r.r + 1.0, Y_ROAD + 0.03), Visibility::Hidden));
         commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(island.clone()), at((r.r - 1.0).max(0.4), Y_ROAD + 0.09), Visibility::Hidden));
     }
     commands.insert_resource(MarkAssets(rect.clone(), flat(Color::srgb(0.97, 0.97, 0.94)), flat(Color::srgb(0.98, 0.78, 0.12))));
@@ -695,6 +704,14 @@ fn drive_cars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asphalt_darkens_strictly_by_class_and_markings_stay_readable() {
+        let lum = |(r, g, b): (f32, f32, f32)| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        assert!(ASPHALT.windows(2).all(|w| lum(w[1]) < lum(w[0])), "ramp must get strictly darker");
+        // white (0.97) and yellow (~0.79 lum) markings keep a clear step over the lightest asphalt
+        assert!(lum((0.98, 0.78, 0.12)) - lum(ASPHALT[0]) > 0.15);
+    }
 
     #[test]
     fn tint_is_neutral_when_free_then_amber_to_red_never_green() {

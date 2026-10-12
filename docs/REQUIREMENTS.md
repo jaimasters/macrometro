@@ -56,11 +56,10 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | # | Item | Status | Owner | Merge batch |
 |---|------|--------|-------|-------------|
 | 1 | Road spacing: min junction spacing per class, min road length, merge close junctions, roads only on demand, roundabout only if ring clears; spacing/overlap test | next | presets worker | B2 |
-| 2 | Asphalt colour ramp by class (light surface to darkest interstate), everywhere incl. rings/zoomed-out; strictly-darker test | next | presets worker | B2 |
-| 3 | R42 (c) traffic-driven roads | later | presets worker | B3 |
-| 4 | R42 (d) freeways + overpass drawing; upgrades re-align with eminent domain | later | presets worker | B3 |
-| 5 | R39 remainder: new lines through existing stations; re-lay existing lines | later | unassigned | B3 |
-| 6 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
-| 7 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
-| 8 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
+| 2 | R42 (c) traffic-driven roads | later | presets worker | B3 |
+| 3 | R42 (d) freeways + overpass drawing; upgrades re-align with eminent domain | later | presets worker | B3 |
+| 4 | R39 remainder: new lines through existing stations; re-lay existing lines | later | unassigned | B3 |
+| 5 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
+| 6 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
+| 7 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
 
