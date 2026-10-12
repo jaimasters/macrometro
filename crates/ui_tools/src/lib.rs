@@ -188,18 +188,25 @@ fn spawn_road_ghosts(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut handles: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
 ) {
     let Some(plan) = plans.read().last() else { return };
     for e in &old {
         commands.entity(e).despawn();
     }
-    let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.25, 0.25, 0.30, 0.10),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
-    });
+    // Create the shared mesh/material once; re-adding them on every plan change leaked assets and stalled frames.
+    let (mesh, mat) = handles
+        .get_or_insert_with(|| {
+            let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+            let mat = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.25, 0.25, 0.30, 0.10),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            });
+            (mesh, mat)
+        })
+        .clone();
     for &(a, b) in &plan.segments {
         commands.spawn((
             RoadGhost,
