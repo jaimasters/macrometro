@@ -1,9 +1,25 @@
-# HANDOFF — batch 2 (mgr-roads, /mnt/ssd/work/macrometro-wt/roads)
-Done + pushed (workspace tests green on Mac before the main pull; rerun after):
-- R43: reset dialog has Hamlet / Small town / Large town; choice stored as "preset seed" in save.preset (localStorage macrometro.preset on web); layout::plan_layout uses city::organic::plan_preset at the first city's core. Seed steps per reset. Test: persist reset_preset_marker_parses.
-- organic.rs warnings fixed. Asphalt ramp roads::ASPHALT (edges + ring discs); test asphalt_darkens_strictly_by_class_and_markings_stay_readable. Interstate shade reserved (no such class yet).
-Not visually checked: all of the above; far-zoom stroke width (queue item) NOT checked.
-Also done: left-hand roundabouts (445d4f3), turn speed planning (c9d6987), preset junction spacing + ring-clear test (organic::junction_gap).
-Not visually checked: all of the above.
-Also done: ring discs thin opaque slabs (4f16003); junctions::merge_close (clearance discs never overlap / never swallow a road end) run in BOTH fresh-city paths (roadgen::gen_town merge->smooth->merge, organic::plan_preset), tests assert_clear over presets + plan_towns seeds.
-NEXT: queue row "Unify city generation" (Jai rule: seed + same growth step N times, presets = seed size + N; absorbs runtime-stub row) is the main next item. Then remaining B2 rows: LANE_W sizing, one-lane tier, far-zoom stroke check. Report to main chat (orchestrator out of context).
+# HANDOFF — roads (mgr-roads)
+
+## Done
+- cab31a4: queue row #10 (give-way signs at T-intersections) added.
+- WIP (amended commit "wip: unify city generation", NOT green, NOT merged):
+  - organic.rs rewritten: `Town { seed, step, run }`; `plan_preset(world, rng_seed, core, preset)`
+    = seed + preset steps (order 0) + FUTURE_STEPS (orders 1..). Preset::shape() = (roads, reach, steps, houses).
+  - roadgen.rs: old gen_town/Grid/Gen deleted; plan_towns calls plan_preset(SmallTown) per region; SEED_ORDER=0.
+  - app/layout.rs uses the new signature.
+
+## Failing (cargo test -p city on Mac via mt.sh)
+- organic: Hamlet seed 1 has a 1-segment stub (node 14); multi-town clearance: node 971 3.73 from junction 457
+  (merge_close only runs inside step; towns from different regions are never merged with each other → run
+  merge_close / clearance check across the merged graph in plan_towns, or keep towns apart).
+- roadgen_tests: 0 arterials (seed must emit arterials), parcel on road 1035, lot not aligned (d<=7 rule) — old
+  generator-specific asserts; relax or rewrite against the new generator.
+- roadbuild: builds only 2 in 120 s; "no underserved plans built"; stall/failsafe test → future edges with order>=1
+  are too few or not adjacent to the built net. Check that FUTURE_STEPS edges attach to built nodes.
+- traffic: a_line_serving_a_busy_origin…, congestion_raises_car_travel_time (depend on plan_towns(7) layout).
+
+## Next
+1. Fix the above, `cargo test --workspace` green, commit item 1 + queue rows 9 done / 8 absorbed.
+2. Items 2–4 (queue rows 6, 7, 5): LANE_W, one-lane tier, far-zoom stroke check.
+3. `git -C /mnt/ssd/work/macrometro checkout docs/REQUIREMENTS.md` then ff-merge mgr-roads. Never merge red.
+Builds: scratchpad mt.sh amends WIP, pushes, runs cargo on Mac ~/macrometro-roads.
