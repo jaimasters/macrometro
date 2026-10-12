@@ -2,7 +2,7 @@
 //! the player and the sim changed: zone growth, built/queued roads, stations, lines, platforms, tracks and money.
 //! Autosaves every 30 s and on exit; a missing, unreadable, wrong-version or other-seed save means a fresh game.
 //! Reset (button + confirm) deletes the save and relaunches.
-use crate::shell::{to_transit, Lines, StationMap, PLAYER};
+use crate::shell::{hop_key, to_transit_with, HopPlan, Hops, Lines, RailGeoms, Razed, StationMap, PLAYER};
 use crate::zones::{GrowthLink, ZoneLayout};
 use bevy::ecs::system::SystemParam;
 use bevy::picking::hover::Hovered;
@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use economy::{Category, Economy};
 use serde::{Deserialize, Serialize};
 use sim_core::AgencyId;
-use transit::{TransitCommands, TransitNet};
+use transit::{Crossing, CrossingKind, TransitCommands, TransitNet};
 use ui_tools::{Stations, ToolAction, ToolCommand};
 
 /// Bump when the format changes; older saves are then ignored (fresh game), never migrated half-way.
@@ -25,6 +25,9 @@ pub struct GrowthSave {
     pub zones: Vec<(f64, f64)>,
     pub built: Vec<bool>,
     pub pending: Vec<(usize, u64)>,
+    /// Zones razed by eminent domain.
+    #[serde(default)]
+    pub gone: Vec<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -34,6 +37,21 @@ pub struct AgencySave {
     /// (category index, amount spent this period)
     pub spend: Vec<(u8, f64)>,
 }
+
+/// One laid rail segment: how the placer routed it (length, speed cap, crossings, arc polyline), measured from `from`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RailSave {
+    pub from: (i32, i32),
+    pub to: (i32, i32),
+    pub len: f64,
+    /// None = no speed cap.
+    pub vcap: Option<f64>,
+    /// (kind index, distance from `from`, road edge)
+    pub crossings: Vec<(u8, f64, u32)>,
+    pub pts: Vec<(f32, f32)>,
+}
+
+const KINDS: [CrossingKind; 3] = [CrossingKind::Level, CrossingKind::Bridge, CrossingKind::Underpass];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GameSave {
@@ -46,6 +64,9 @@ pub struct GameSave {
     pub platforms: Vec<((i32, i32), u8)>,
     /// Track count per segment between two stations.
     pub tracks: Vec<((i32, i32), (i32, i32), u8)>,
+    /// Placer results per segment (older saves have none: segments are laid straight).
+    #[serde(default)]
+    pub rails: Vec<RailSave>,
     pub agencies: Vec<AgencySave>,
 }
 
@@ -163,6 +184,7 @@ struct Collect<'w> {
     map: Res<'w, StationMap>,
     net: Res<'w, TransitNet>,
     eco: Res<'w, Economy>,
+    geoms: Res<'w, RailGeoms>,
 }
 
 impl Collect<'_> {
@@ -181,6 +203,31 @@ impl Collect<'_> {
                 }
             }
         }
+        let mut rails: Vec<RailSave> = vec![];
+        for l in &self.lines.all {
+            for w in l.cells.windows(2) {
+                let Some((na, nb)) = self.map.node(w[0]).zip(self.map.node(w[1])) else { continue };
+                let Some(i) = self.net.0.rail_edge(na, nb) else { continue };
+                let (e, key) = (&self.net.0.edges[i], hop_key(w[0], w[1]));
+                if rails.iter().any(|r| hop_key(IVec2::new(r.from.0, r.from.1), IVec2::new(r.to.0, r.to.1)) == key) {
+                    continue;
+                }
+                // the edge runs from its node `a`; find that station's cell to anchor the crossings
+                let (from, to) = if e.a == na { (w[0], w[1]) } else { (w[1], w[0]) };
+                let mut pts: Vec<Vec2> = self.geoms.0.get(&key).cloned().unwrap_or_default();
+                if from != key.0 {
+                    pts.reverse();
+                }
+                rails.push(RailSave {
+                    from: xy(&from),
+                    to: xy(&to),
+                    len: e.len,
+                    vcap: e.vcap.is_finite().then_some(e.vcap),
+                    crossings: e.crossings.iter().map(|c| (KINDS.iter().position(|k| *k == c.kind).unwrap_or(0) as u8, c.at, c.road)).collect(),
+                    pts: pts.iter().map(|p| (p.x, p.y)).collect(),
+                });
+            }
+        }
         Some(GameSave {
             magic: MAGIC.into(),
             version: SAVE_VERSION,
@@ -190,6 +237,7 @@ impl Collect<'_> {
             lines: self.lines.all.iter().map(|l| l.cells.iter().map(xy).collect()).collect(),
             platforms: self.stations.0.iter().filter_map(|c| Some((xy(c), self.net.0.platform_count(self.map.node(*c)?)))).collect(),
             tracks,
+            rails,
             agencies: self
                 .eco
                 .0
@@ -211,12 +259,34 @@ fn restore_game(
     mut lines: ResMut<Lines>,
     mut tc: ResMut<TransitCommands>,
     mut eco: ResMut<Economy>,
+    mut geoms: ResMut<RailGeoms>,
+    mut razed: ResMut<Razed>,
 ) {
     let Some(g) = &loaded.0 else { return };
+    razed.0 = vec![false; layout.0.len()];
+    for &z in &g.growth.gone {
+        if let Some(r) = razed.0.get_mut(z) {
+            *r = true;
+        }
+    }
     let centres: Vec<Vec2> = layout.0.iter().map(|z| z.center).collect();
     let cell = |c: &(i32, i32)| IVec2::new(c.0, c.1);
+    // segments exactly as the placer laid them
+    let mut hops = Hops::new();
+    for r in &g.rails {
+        let (from, to) = (cell(&r.from), cell(&r.to));
+        let crossings = r.crossings.iter().map(|(k, at, road)| Crossing { kind: KINDS[(*k as usize).min(2)], at: *at, road: *road }).collect();
+        hops.insert(hop_key(from, to), Some(HopPlan { from, len: r.len, vcap: r.vcap.unwrap_or(f64::INFINITY), crossings }));
+        if !r.pts.is_empty() {
+            let mut pts: Vec<Vec2> = r.pts.iter().map(|p| Vec2::new(p.0, p.1)).collect();
+            if from != hop_key(from, to).0 {
+                pts.reverse();
+            }
+            geoms.0.insert(hop_key(from, to), pts);
+        }
+    }
     let run = |action: ToolAction, tc: &mut TransitCommands, map: &mut StationMap| {
-        tc.0.extend(to_transit(&ToolCommand { agency: PLAYER, action }, map, &centres).0);
+        tc.0.extend(to_transit_with(&ToolCommand { agency: PLAYER, action }, map, &centres, &hops).0);
     };
     for c in g.stations.iter().map(cell) {
         stations.0.push(c);
@@ -391,11 +461,12 @@ mod tests {
             magic: MAGIC.into(),
             version: SAVE_VERSION,
             seed: 7,
-            growth: GrowthSave { tick: 1234, zones: vec![(12.5, 3.25), (0.0, 0.0)], built: vec![true, false, true], pending: vec![(1, 1300)] },
+            growth: GrowthSave { tick: 1234, zones: vec![(12.5, 3.25), (0.0, 0.0)], built: vec![true, false, true], pending: vec![(1, 1300)], gone: vec![1] },
             stations: vec![(0, 12), (40, 12)],
             lines: vec![vec![(0, 12), (40, 12)]],
             platforms: vec![((0, 12), 3), ((40, 12), 1)],
             tracks: vec![((0, 12), (40, 12), 4)],
+            rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)] }],
             agencies: vec![AgencySave { id: 1, standing: 0.42, spend: vec![(0, 55.5), (2, 1.0)] }],
         }
     }
@@ -465,7 +536,7 @@ mod tests {
         // the sim thread refreshes its copy every 5 s; seed one for the test
         let snap = a.world().resource::<GrowthLink>().snapshots.latest();
         let n = snap.pop.len();
-        let growth = GrowthSave { tick: 321, zones: (0..n).map(|i| (i as f64, 0.5)).collect(), built: snap.built.clone(), pending: vec![] };
+        let growth = GrowthSave { tick: 321, zones: (0..n).map(|i| (i as f64, 0.5)).collect(), built: snap.built.clone(), pending: vec![], gone: vec![] };
         *a.world().resource::<GrowthLink>().shared.save.lock().unwrap() = Some(growth);
         let saved = collect(&mut a);
         assert_eq!(saved.stations, cells.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>());

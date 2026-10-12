@@ -96,6 +96,10 @@ pub struct Shared {
     pub transit: Mutex<Option<Arc<TransitInput>>>,
     /// Latest saveable growth state, refreshed by the sim every SAVE_EVERY ticks (read by autosave).
     pub save: Mutex<Option<GrowthSave>>,
+    /// Level-crossing closure per road edge (share of time shut), refreshed by the ECS from the train sim.
+    pub closure: Mutex<Vec<f32>>,
+    /// Zones demolished by the player (eminent domain), drained by the sim.
+    pub demolish: Mutex<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +149,7 @@ pub struct GrowthSimulation {
     scorecard: Scorecard,
     shared: Arc<Shared>,
     road_reserve: f64,
+    gone: Vec<usize>,
 }
 
 impl GrowthSimulation {
@@ -155,6 +160,7 @@ impl GrowthSimulation {
             zones: self.sim.zones.0.iter().map(|z| (z.pop, z.jobs)).collect(),
             built: self.builder.built.clone(),
             pending: self.builder.pending.clone(),
+            gone: self.gone.clone(),
         }
     }
 
@@ -167,6 +173,19 @@ impl GrowthSimulation {
             (z.pop, z.jobs) = (*pop, *jobs);
         }
         self.builder.restore(&self.plan, &g.built, &g.pending);
+        self.demolish(&g.gone);
+    }
+
+    /// Eminent domain: these zones are gone for good (no people, no land to regrow on).
+    fn demolish(&mut self, zones: &[usize]) {
+        for &z in zones {
+            if let Some(zone) = self.sim.zones.0.get_mut(z) {
+                (zone.pop, zone.jobs, zone.capacity) = (0.0, 0.0, 0.0);
+                if !self.gone.contains(&z) {
+                    self.gone.push(z);
+                }
+            }
+        }
     }
 
     pub fn new(zones: Zones, plan: Arc<TownPlan>, shared: Arc<Shared>) -> Self {
@@ -181,6 +200,7 @@ impl GrowthSimulation {
             plan,
             shared,
             road_reserve: 0.0,
+            gone: vec![],
         }
     }
 }
@@ -191,6 +211,8 @@ impl Simulation for GrowthSimulation {
     fn apply(&mut self, _cmd: &AgencyCommand) {}
     fn step(&mut self, tick: u64) {
         let n = self.sim.zones.0.len();
+        let razed = std::mem::take(&mut *self.shared.demolish.lock().unwrap());
+        self.demolish(&razed);
         let transit = self.shared.transit.lock().unwrap().clone();
         // Transit service gates the pace: no service => CAR_ONLY_GROWTH of the rate, full service => all of it.
         let mean_share = self.traffic.out.transit_share().clamp(0.0, 1.0);
@@ -210,6 +232,7 @@ impl Simulation for GrowthSimulation {
         self.builder.step(tick, &self.plan, &self.sim.zones, &self.traffic.out.zone_share, rate * ROADS_PER_RATE);
         if tick % TRAFFIC_EVERY == 0 {
             let t = transit.as_ref().map(|t| &t.times);
+            self.traffic.set_closure(&self.shared.closure.lock().unwrap());
             self.traffic.assign(&self.builder.built, &self.sim.zones, t, hour_of(tick));
             self.scorecard = scorecard(&self.traffic.out, transit.as_ref().map_or(0.0, |t| t.capacity));
         }

@@ -1,19 +1,19 @@
 //! Wires ui_tools commands into transit and economy, and draws the player's network as a flat transit map:
 //! white stations with dark outlines, thick coloured octilinear lines, capsule trains.
 use crate::camera::MapCam;
-use crate::zones::ZoneLayout;
+use crate::zones::{CityPlan, GrowthLink, ZoneLayout};
+use city::placer::{place_track, Ctx, DEFAULT_RADIUS};
 use bevy::prelude::*;
 use economy::{Category, CurrentBudget, Economy, SpendCommand, SpendQueue};
 use sim_core::AgencyId;
 use sound::{SoundEvent, SoundKind};
 use std::collections::HashMap;
-use transit::{Edge, EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands, TransitNet};
+use transit::{Crossing, Edge, EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands, TransitNet};
 use ui_tools::{octilinear, path_len, route, ActiveAgency, ToolAction, ToolCommand};
 
 /// The local player's agency (agency 0 is the city).
 pub const PLAYER: AgencyId = AgencyId(1);
 const STATION_COST: f64 = 50.0;
-const COST_PER_LEN: f64 = 2.0;
 /// Price of one extra platform (B2 station menu; C1 trains need platforms to enter).
 pub const PLATFORM_COST: f64 = 40.0;
 
@@ -56,10 +56,57 @@ fn nearest_zone(centres: &[Vec2], p: Vec2) -> Option<usize> {
     (0..centres.len()).min_by(|&a, &b| centres[a].distance(p).total_cmp(&centres[b].distance(p)))
 }
 
+/// How one rail segment between two stations is laid: the placer's length, speed cap and crossings, measured from `from`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HopPlan {
+    pub from: IVec2,
+    pub len: f64,
+    pub vcap: f64,
+    pub crossings: Vec<Crossing>,
+}
+
+/// Segment plans by station pair (order-free key). `Some` = lay this; `None` = the segment already exists. A segment
+/// with no entry is laid straight along the octilinear route (tests, legacy).
+pub type Hops = HashMap<(IVec2, IVec2), Option<HopPlan>>;
+
+/// Order-free key of a segment between two station cells.
+pub fn hop_key(a: IVec2, b: IVec2) -> (IVec2, IVec2) {
+    if (a.x, a.y) <= (b.x, b.y) { (a, b) } else { (b, a) }
+}
+
+/// Station-to-station polylines the placer laid (arcs), for drawing and saving.
+#[derive(Resource, Default)]
+pub struct RailGeoms(pub HashMap<(IVec2, IVec2), Vec<Vec2>>);
+
+/// Zones razed so far by eminent domain (indexed by zone).
+#[derive(Resource, Default)]
+pub struct Razed(pub Vec<bool>);
+
+/// The rail command for hop c0 -> c1 (a, b are the stations' transit nodes).
+fn rail_for(hops: &Hops, c: (IVec2, IVec2), a: NodeId, b: NodeId, agency: AgencyId) -> Option<TransitCommand> {
+    let fallback = || {
+        let len = path_len(&octilinear(c.0.as_vec2(), c.1.as_vec2())).max(1.0) as f64;
+        Some(TransitCommand { agency, action: TransitAction::AddEdge { a, b, len, kind: EdgeKind::Rail } })
+    };
+    match hops.get(&hop_key(c.0, c.1)) {
+        None => fallback(),
+        Some(None) => None,
+        Some(Some(h)) => {
+            // crossings were measured from `h.from`; flip them if this line runs the other way
+            let crossings = h.crossings.iter().map(|x| if h.from == c.0 { *x } else { Crossing { at: h.len - x.at, ..*x } }).collect();
+            Some(TransitCommand { agency, action: TransitAction::AddRail { a, b, len: h.len, tracks: 2, vcap: h.vcap, crossings } })
+        }
+    }
+}
+
+pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> (Vec<TransitCommand>, Vec<IVec2>) {
+    to_transit_with(cmd, map, centres, &Hops::new())
+}
+
 /// Translate a player command into agency-tagged transit commands (D-8). A new station is a node
 /// joined to its nearest zone by a road edge so rail between stations can change zone costs.
 /// Returns the commands and the cells that became new stations.
-pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> (Vec<TransitCommand>, Vec<IVec2>) {
+pub fn to_transit_with(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2], hops: &Hops) -> (Vec<TransitCommand>, Vec<IVec2>) {
     let (agency, mut out, mut fresh) = (cmd.agency, vec![], vec![]);
     // existing station an extend/platform command refers to (looked up before `node` borrows the map)
     let known = match &cmd.action {
@@ -105,16 +152,14 @@ pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> 
         ToolAction::ExtendLine { line, from, to } => {
             if let Some(f) = known {
                 let t = node(*to, &mut out, &mut fresh);
-                let len = path_len(&octilinear(from.as_vec2(), to.as_vec2())).max(1.0) as f64;
-                out.push(TransitCommand { agency, action: TransitAction::AddEdge { a: f, b: t, len, kind: EdgeKind::Rail } });
+                out.extend(rail_for(hops, (*from, *to), f, t, agency));
                 out.push(TransitCommand { agency, action: TransitAction::ExtendLine { line: transit::LineId(*line as u32), from: f, to: t } });
             }
         }
         ToolAction::DrawLine { cells } => {
             let stops: Vec<NodeId> = cells.iter().map(|&c| node(c, &mut out, &mut fresh)).collect();
             for (w, c) in stops.windows(2).zip(cells.windows(2)) {
-                let len = path_len(&octilinear(c[0].as_vec2(), c[1].as_vec2())).max(1.0) as f64;
-                out.push(TransitCommand { agency, action: TransitAction::AddEdge { a: w[0], b: w[1], len, kind: EdgeKind::Rail } });
+                out.extend(rail_for(hops, (c[0], c[1]), w[0], w[1], agency));
             }
             out.push(TransitCommand { agency, action: TransitAction::AddLine { class: RailClass::LightRail, stops, alignment_mismatch: 0.0 } });
         }
@@ -185,9 +230,21 @@ impl Plugin for ShellPlugin {
         }
         app.insert_resource(StationMap::new(first_free))
             .init_resource::<Lines>()
+            .init_resource::<RailGeoms>()
+            .init_resource::<Razed>()
             .insert_resource(ActiveAgency(PLAYER))
             .add_systems(Update, apply_tool_commands);
     }
+}
+
+/// Where the player's drag bulges away from the straight line between two stations (the octilinear route's bend):
+/// the placer goes round that side.
+fn steer_point(a: IVec2, b: IVec2) -> Option<Vec2> {
+    let (pa, pb) = (a.as_vec2(), b.as_vec2());
+    let chord = pb - pa;
+    let n = Vec2::new(-chord.y, chord.x).normalize_or_zero();
+    let off = |p: &Vec2| (*p - pa).dot(n).abs();
+    octilinear(pa, pb).into_iter().max_by(|x, y| off(x).total_cmp(&off(y))).filter(|p| off(p) > 2.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -199,6 +256,12 @@ fn apply_tool_commands(
     layout: Res<ZoneLayout>,
     cam: Option<Res<MapCam>>,
     net: Res<TransitNet>,
+    cp: Res<CityPlan>,
+    link: Res<GrowthLink>,
+    seed: Res<world_gen::WorldSeed>,
+    mut razed: ResMut<Razed>,
+    mut geoms: ResMut<RailGeoms>,
+    mut eco: ResMut<Economy>,
     mut spend: ResMut<SpendQueue>,
     mut sound: MessageWriter<SoundEvent>,
 ) {
@@ -214,19 +277,70 @@ fn apply_tool_commands(
         } else {
             0.0
         };
-        let (tc, fresh) = to_transit(c, &mut map, &centres);
+        // new segments are auto-routed (arcs, round obstacles, steered by the drag) and priced: track, crossings,
+        // and eminent domain for whatever cannot be avoided
+        let pairs: Vec<(IVec2, IVec2)> = match &c.action {
+            ToolAction::DrawLine { cells } => cells.windows(2).map(|w| (w[0], w[1])).collect(),
+            ToolAction::ExtendLine { from, to, .. } => vec![(*from, *to)],
+            _ => vec![],
+        };
+        let (mut hops, mut hop_cost, mut standing_hit, mut razed_now) = (Hops::new(), 0.0, 0.0, vec![]);
+        if !pairs.is_empty() {
+            let snap = link.snapshots.latest();
+            let n = cp.plan.parcels.len();
+            razed.0.resize(n, false);
+            let mut gone = razed.0.clone();
+            let land = |p: Vec2| city::is_land(seed.0, p);
+            let mut refused = false;
+            for (c0, c1) in pairs {
+                let key = hop_key(c0, c1);
+                if hops.contains_key(&key) {
+                    continue;
+                }
+                if map.node(c0).zip(map.node(c1)).and_then(|(a, b)| net.0.rail_edge(a, b)).is_some() {
+                    hops.insert(key, None);
+                    continue;
+                }
+                let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &gone, land: &land };
+                let Some(p) = place_track(&ctx, c0.as_vec2(), c1.as_vec2(), steer_point(c0, c1), DEFAULT_RADIUS) else {
+                    refused = true;
+                    break;
+                };
+                for &z in &p.demolition.zones {
+                    gone[z] = true;
+                    razed_now.push(z);
+                }
+                hop_cost += p.cost.total;
+                standing_hit += p.demolition.standing;
+                let mut pts = p.pts.clone();
+                if c0 != key.0 {
+                    pts.reverse();
+                }
+                geoms.0.insert(key, pts);
+                hops.insert(key, Some(HopPlan { from: c0, len: p.len.max(1.0), vcap: p.vcap, crossings: p.crossings.clone() }));
+            }
+            if refused {
+                warn!("track refused: too much water to bridge");
+                continue;
+            }
+        }
+        let (tc, fresh) = to_transit_with(c, &mut map, &centres, &hops);
         transit.0.extend(tc);
         if let ToolAction::DeleteStation { cell } = &c.action {
             lines.remove_station(*cell);
             continue;
         }
-        let route_len = match &c.action {
-            ToolAction::DrawLine { cells } => path_len(&route(cells)) as f64,
-            ToolAction::ExtendLine { from, to, .. } => path_len(&octilinear(from.as_vec2(), to.as_vec2())) as f64,
-            _ => 0.0,
-        };
+        if !razed_now.is_empty() {
+            for &z in &razed_now {
+                razed.0[z] = true;
+            }
+            link.shared.demolish.lock().unwrap().extend(razed_now);
+        }
+        if let Some(a) = eco.0.agencies.get_mut(&c.agency) {
+            a.standing = (a.standing - standing_hit).max(0.0);
+        }
         let platform = if matches!(c.action, ToolAction::AddPlatform { .. }) { PLATFORM_COST } else { 0.0 };
-        let amount = STATION_COST * fresh.len() as f64 + COST_PER_LEN * route_len + platform + track_cost;
+        let amount = STATION_COST * fresh.len() as f64 + hop_cost + platform + track_cost;
         if amount > 0.0 {
             spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount });
         }

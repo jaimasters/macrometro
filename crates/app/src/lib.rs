@@ -17,7 +17,7 @@ mod terrain;
 mod zones;
 
 pub use camera::{MapCam, MapCameraPlugin};
-pub use shell::{to_transit, ShellPlugin, StationMap};
+pub use shell::{to_transit, to_transit_with, ShellPlugin, StationMap};
 pub use terrain::{chunk_triangles, ground_y, wanted_chunks, TerrainPlugin};
 pub use zones::{build_layout, CityPlan, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneKind, ZoneLayout, ZonesPlugin};
 

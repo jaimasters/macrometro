@@ -17,6 +17,8 @@ pub const CAP_LOCAL: f64 = 300.0;
 pub const CAP_ARTERIAL: f64 = 900.0;
 /// Gridlock floor: congestion never slows an edge by more than this factor.
 pub const MAX_SLOWDOWN: f64 = 6.0;
+/// A crossing shut all the time still passes a tenth of its capacity.
+const MAX_CLOSURE: f64 = 0.9;
 const BPR_ALPHA: f64 = 1.0;
 const BPR_BETA: f64 = 4.0;
 const PARK_MIN: f64 = 3.0;
@@ -84,6 +86,8 @@ pub struct Traffic {
     cap: Vec<f64>,
     /// Smoothed car flow per edge (veh/h, both directions).
     pub flow: Vec<f64>,
+    /// Fraction of time each edge is closed by a train on a level crossing (0..1).
+    closed: Vec<f32>,
     zone_node: Vec<u32>,
     zone_acc: Vec<f64>,
     access: Vec<usize>,
@@ -113,6 +117,7 @@ impl Traffic {
             t0: g.edges.iter().map(|e| e.len as f64 / speed(e.class)).collect(),
             cap: g.edges.iter().map(|e| if e.class == RoadClass::Arterial { CAP_ARTERIAL } else { CAP_LOCAL }).collect(),
             flow: vec![0.0; g.edges.len()],
+            closed: vec![0.0; g.edges.len()],
             zone_node,
             zone_acc,
             access: plan.parcels.iter().map(|p| p.access).collect(),
@@ -121,14 +126,28 @@ impl Traffic {
         }
     }
 
-    /// Congested travel time over edge `e` (minutes): free flow * (1 + a (q/c)^b), capped at MAX_SLOWDOWN.
+    /// Level crossings: `closed[e]` = share of time edge `e` is shut while a train passes (missing = open).
+    pub fn set_closure(&mut self, closed: &[f32]) {
+        for (c, i) in self.closed.iter_mut().zip(0..) {
+            *c = closed.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        }
+    }
+
+    /// Capacity of edge `e` after crossing closures: a crossing that is shut half the time passes half the cars.
+    fn capacity(&self, e: usize) -> f64 {
+        self.cap[e] * (1.0 - MAX_CLOSURE * self.closed[e] as f64)
+    }
+
+    /// Congested travel time over edge `e` (minutes): free flow * (1 + a (q/c)^b), capped at MAX_SLOWDOWN; cars also
+    /// wait out the closed share of the time at a level crossing.
     pub fn edge_time(&self, e: usize) -> f64 {
-        self.t0[e] * (1.0 + BPR_ALPHA * (self.flow[e] / self.cap[e]).powf(BPR_BETA)).min(MAX_SLOWDOWN)
+        let wait = 1.0 / (1.0 - MAX_CLOSURE * self.closed[e] as f64);
+        self.t0[e] * ((1.0 + BPR_ALPHA * (self.flow[e] / self.capacity(e)).powf(BPR_BETA)).min(MAX_SLOWDOWN)) * wait.min(MAX_SLOWDOWN)
     }
 
     /// Volume over capacity of edge `e`.
     pub fn vc(&self, e: usize) -> f64 {
-        self.flow[e] / self.cap[e]
+        self.flow[e] / self.capacity(e)
     }
 
     /// Congestion slowdown factor (>= 1): congested time over free-flow time.
@@ -300,6 +319,33 @@ mod tests {
             night.assign(&built, &z_heavy, None, 3.0);
         }
         assert!(night.out.mean_trip_time < heavy.out.mean_trip_time);
+    }
+
+    #[test]
+    fn a_level_crossing_closed_by_trains_slows_the_road_and_queues_cars() {
+        let (plan, z, built) = setup(0.6);
+        let (mut open, mut shut) = (Traffic::new(&plan), Traffic::new(&plan));
+        settle(&mut open, &built, &z, None);
+        let busiest = (0..open.flow.len()).max_by(|&a, &b| open.flow[a].total_cmp(&open.flow[b])).unwrap();
+        let mut closed = vec![0.0; plan.graph.edges.len()];
+        closed[busiest] = 0.5;
+        shut.set_closure(&closed);
+        // same load on the shut road: slower and more congested (assignment may later reroute cars away)
+        shut.flow = open.flow.clone();
+        assert!(shut.edge_time(busiest) > open.edge_time(busiest) * 1.5, "{} vs {}", shut.edge_time(busiest), open.edge_time(busiest));
+        assert!(shut.slowdown(busiest) > open.slowdown(busiest));
+        assert!(shut.vc(busiest) > open.vc(busiest));
+        // once cars re-assign they shed the shut road
+        settle(&mut shut, &built, &z, None);
+        assert!(shut.flow[busiest] < open.flow[busiest], "{} vs {}", shut.flow[busiest], open.flow[busiest]);
+        // an edge with no crossing is untouched by the closure of another
+        let quiet = (0..open.flow.len()).find(|&e| e != busiest && shut.closed[e] == 0.0).unwrap();
+        assert_eq!(shut.closed[quiet], 0.0);
+        // a bridge never closes anything: no closure => identical to open
+        let mut bridged = Traffic::new(&plan);
+        bridged.set_closure(&[]);
+        settle(&mut bridged, &built, &z, None);
+        assert_eq!(bridged.flow, open.flow);
     }
 
     fn fast_transit(n: usize, rows: &[usize], minutes: f64) -> CostMatrix {

@@ -75,8 +75,21 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
     });
 }
 
-fn step_trains(net: Res<TransitNet>, mut trains: ResMut<Trains>) {
+fn step_trains(net: Res<TransitNet>, mut trains: ResMut<Trains>, link: Option<Res<crate::zones::GrowthLink>>, cp: Option<Res<crate::zones::CityPlan>>, mut tick: Local<u32>) {
     trains.0.step(&net.0);
+    // once a second of sim time hand the road closures (trains on level crossings) to the traffic model
+    *tick += 1;
+    if *tick % 64 == 0 {
+        if let (Some(link), Some(cp)) = (link, cp) {
+            let mut closed = vec![0.0f32; cp.plan.graph.edges.len()];
+            for (road, f) in trains.0.take_closure() {
+                if let Some(c) = closed.get_mut(road as usize) {
+                    *c = f;
+                }
+            }
+            *link.shared.closure.lock().unwrap() = closed;
+        }
+    }
 }
 
 fn left(v: Vec2) -> Vec2 {
