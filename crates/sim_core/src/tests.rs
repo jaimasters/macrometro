@@ -29,8 +29,8 @@ fn clock_alpha_in_range() {
 #[test]
 fn command_queue_fifo_applied_at_tick_boundary() {
     let (mut sim, tx, out) = Sim::new(CoreSim::new(7));
-    tx.send(Command::Custom(1, 5)).unwrap();
-    tx.send(Command::Custom(2, 9)).unwrap();
+    tx.send(Command::Custom(1, 5).by(AgencyId(0))).unwrap();
+    tx.send(Command::Custom(2, 9).by(AgencyId(0))).unwrap();
     assert_eq!(sim.state.custom_sum, 0, "not applied before tick boundary");
     sim.tick_once();
     assert_eq!(sim.state.custom_sum, (5 ^ 1) + (9 ^ 2));
@@ -40,11 +40,11 @@ fn command_queue_fifo_applied_at_tick_boundary() {
 #[test]
 fn pause_resume_speed_commands() {
     let (mut sim, tx, out) = Sim::new(CoreSim::new(7));
-    tx.send(Command::Pause).unwrap();
+    tx.send(Command::Pause.by(AgencyId(0))).unwrap();
     sim.tick_once();
     assert_eq!(out.latest().tick, 0);
-    tx.send(Command::Resume).unwrap();
-    tx.send(Command::SetSpeed(3)).unwrap();
+    tx.send(Command::Resume.by(AgencyId(0))).unwrap();
+    tx.send(Command::SetSpeed(3).by(AgencyId(0))).unwrap();
     sim.tick_once();
     assert_eq!(out.latest().tick, 3);
 }
@@ -92,10 +92,10 @@ fn same_seed_same_hash() {
     for i in 0..100u32 {
         for tx in [&tx_a, &tx_b] {
             match i {
-                10 => tx.send(Command::Custom(1, 5)).unwrap(),
-                20 => tx.send(Command::SetSpeed(2)).unwrap(),
-                50 => tx.send(Command::Pause).unwrap(),
-                55 => tx.send(Command::Resume).unwrap(),
+                10 => tx.send(Command::Custom(1, 5).by(AgencyId(0))).unwrap(),
+                20 => tx.send(Command::SetSpeed(2).by(AgencyId(0))).unwrap(),
+                50 => tx.send(Command::Pause.by(AgencyId(0))).unwrap(),
+                55 => tx.send(Command::Resume.by(AgencyId(0))).unwrap(),
                 _ => {}
             }
         }
@@ -147,4 +147,25 @@ fn thread_stop_joins() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(out.latest().tick, t1, "thread kept advancing after stop");
     assert!(t1 > 0);
+}
+
+#[test]
+fn identical_command_streams_identical_hashes() {
+    let run = |script: &[(u64, u32, Command)]| {
+        let (mut sim, tx, _out) = Sim::new(CoreSim::new(5));
+        for t in 0..60u64 {
+            for (at, ag, c) in script {
+                if *at == t {
+                    tx.send(c.by(AgencyId(*ag))).unwrap();
+                }
+            }
+            sim.tick_once();
+        }
+        sim.state.state_hash()
+    };
+    let s = [(3, 1, Command::Custom(7, 11)), (3, 2, Command::Custom(8, 12)), (30, 1, Command::SetSpeed(2))];
+    assert_eq!(run(&s), run(&s));
+    // same commands, different issuing agency => different state
+    let s2 = [(3, 2, Command::Custom(7, 11)), (3, 2, Command::Custom(8, 12)), (30, 1, Command::SetSpeed(2))];
+    assert_ne!(run(&s), run(&s2));
 }

@@ -6,3 +6,4 @@
 - D-4 | 2026-10-12 | Commands carry no tick stamp; applied at next tick boundary in FIFO order | arch spec says so; determinism tests enqueue before stepping | tick-stamped commands (needed only for multiplayer/replay)
 - D-5 | 2026-10-12 | Catch-up capped by max_ticks, excess time dropped | avoid spiral of death | unbounded catch-up
 - D-6 | 2026-10-12 | wasm: no thread; `Sim::pump` time-sliced (D-arch-1) | no wasm threads | cfg-less thread spawn
+- D-7 | 2026-10-12 | Command channel carries AgencyCommand; Pause/Resume/SetSpeed accepted from any agency | D-8 input-driven determinism | per-agency permissions (add with netcode)

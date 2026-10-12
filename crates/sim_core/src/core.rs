@@ -83,8 +83,25 @@ pub enum Command {
     Custom(u32, i64),
 }
 
-pub type CommandSender = Sender<Command>;
-pub type CommandQueue = Receiver<Command>;
+/// Agency (player/AI/city) issuing a command. Shared type; economy imports it (D-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct AgencyId(pub u32);
+
+/// A command tagged with its issuing agency: the only thing that enters the sim (input-driven, D-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgencyCommand {
+    pub agency: AgencyId,
+    pub cmd: Command,
+}
+
+impl Command {
+    pub fn by(self, agency: AgencyId) -> AgencyCommand {
+        AgencyCommand { agency, cmd: self }
+    }
+}
+
+pub type CommandSender = Sender<AgencyCommand>;
+pub type CommandQueue = Receiver<AgencyCommand>;
 
 pub fn command_channel() -> (CommandSender, CommandQueue) {
     mpsc::channel()
@@ -110,7 +127,7 @@ impl<T> Handoff<T> {
 pub trait Simulation: Send + 'static {
     type Snapshot: Send + Sync + 'static;
     /// Custom commands (Pause/Resume/SetSpeed are handled by `Sim`).
-    fn apply(&mut self, cmd: &Command);
+    fn apply(&mut self, cmd: &AgencyCommand);
     /// Advance one step. `tick` is the index of the step being taken.
     fn step(&mut self, tick: u64);
     fn snapshot(&self, tick: u64) -> Self::Snapshot;
@@ -136,12 +153,12 @@ impl<S: Simulation> Sim<S> {
     }
 
     pub fn tick_once(&mut self) {
-        while let Ok(cmd) = self.rx.try_recv() {
-            match cmd {
+        while let Ok(ac) = self.rx.try_recv() {
+            match ac.cmd {
                 Command::Pause => self.paused = true,
                 Command::Resume => self.paused = false,
                 Command::SetSpeed(s) => self.speed = s,
-                c => self.state.apply(&c),
+                _ => self.state.apply(&ac),
             }
         }
         if !self.paused {
@@ -225,9 +242,10 @@ pub struct CoreSnapshot {
 
 impl Simulation for CoreSim {
     type Snapshot = CoreSnapshot;
-    fn apply(&mut self, cmd: &Command) {
-        if let Command::Custom(k, v) = *cmd {
-            self.custom_sum = self.custom_sum.wrapping_add(v ^ k as i64);
+    fn apply(&mut self, ac: &AgencyCommand) {
+        if let Command::Custom(k, v) = ac.cmd {
+            // agency folded in so who-issued-it affects the hash
+            self.custom_sum = self.custom_sum.wrapping_add((v ^ k as i64).wrapping_mul(ac.agency.0 as i64 + 1));
         }
     }
     fn step(&mut self, _tick: u64) {
