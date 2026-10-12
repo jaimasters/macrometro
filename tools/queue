@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# queue list | next | add "item" OWNER BATCH [STATUS] | set-status N S | set-owner N O | done N | selftest
+# Edits the Queue table in docs/REQUIREMENTS.md line by line. done removes the row and renumbers.
+set -euo pipefail
+F=${QUEUE_FILE:-$(git rev-parse --show-toplevel)/docs/REQUIREMENTS.md}
+rows() { grep -nE '^\| [0-9]+ \|' "$F"; }
+setcol() { # row col value
+  awk -v n="$1" -v c="$2" -v v="$3" -F' \\| ' 'BEGIN{OFS=" | "}
+    $0 ~ "^\\| "n" \\|" {$c=v} {print}' "$F" > "$F.tmp" && mv "$F.tmp" "$F"; }
+renum() { awk 'BEGIN{i=0} /^\| [0-9]+ \|/{i++; sub(/^\| [0-9]+ \|/, "| " i " |")} {print}' "$F" > "$F.tmp" && mv "$F.tmp" "$F"; }
+case ${1:-list} in
+  list) rows | cut -d: -f2- ;;
+  next) rows | cut -d: -f2- | grep -E '\| (in progress|next) \|' | head -1 ;;
+  add) last=$(rows | tail -1 | cut -d: -f1); n=$(( $(rows | wc -l) + 1 ))
+       sed -i "${last}a | $n | $2 | ${5:-next} | $3 | $4 |" "$F" ;;
+  set-status) setcol "$2" 3 "$3" ;;
+  set-owner) setcol "$2" 4 "$3" ;;
+  done) sed -i -E "/^\| $2 \|/d" "$F"; renum ;;
+  selftest) t=$(mktemp); printf '## Queue\n\n| # | Item | Status | Owner | Merge batch |\n|---|---|---|---|---|\n| 1 | a | next | x | B1 |\n| 2 | b | later | y | B2 |\n\n## Other\n' > "$t"
+    export QUEUE_FILE=$t; $0 add c z B3; $0 set-status 2 "in progress"; $0 done 1; $0 set-owner 1 w
+    [ "$($0 list)" = "$(printf '| 1 | b | in progress | w | B2 |\n| 2 | c | next | z | B3 |')" ] || { echo FAIL; $0 list; exit 1; }
+    [ "$($0 next)" = "| 1 | b | in progress | w | B2 |" ] || { echo FAIL next; exit 1; }
+    d=$(dirname "$0"); printf 'X\n' | "$d/section" "$t" Queue --replace; [ "$("$d/section" "$t" Queue)" = X ] && grep -q '^## Other' "$t" || { echo FAIL section; exit 1; }
+    rm -f "$t"; echo ok ;;
+  *) sed -n '2,3p' "$0"; exit 1 ;;
+esac
