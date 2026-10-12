@@ -49,6 +49,22 @@ impl RoadBuilder {
         Self { built, pending: vec![], agency: RoadAgency::new(agency), accum: 0.0, stall: 0, node_built }
     }
 
+    /// Resume from saved state (built roads + queued builds). Length mismatches (a save from another map) are ignored.
+    pub fn restore(&mut self, plan: &TownPlan, built: &[bool], pending: &[(usize, u64)]) {
+        let g = &plan.graph;
+        if built.len() != g.edges.len() || pending.iter().any(|p| p.0 >= g.edges.len()) {
+            return;
+        }
+        self.built = built.to_vec();
+        self.pending = pending.to_vec();
+        for (e, b) in g.edges.iter().zip(&self.built) {
+            if *b {
+                self.node_built[e.a as usize] = true;
+                self.node_built[e.b as usize] = true;
+            }
+        }
+    }
+
     pub fn is_built(&self, edge: usize) -> bool {
         self.built[edge]
     }

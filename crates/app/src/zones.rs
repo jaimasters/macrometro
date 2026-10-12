@@ -3,6 +3,7 @@
 //! the ECS side mirrors built roads into transit, feeds it transit times and draws what the snapshot says.
 use bevy::prelude::*;
 use city::{hour_of, RoadBuilder, TownPlan, Traffic, TrafficOut, ROADS_PER_RATE, TRAFFIC_EVERY};
+use crate::persist::GrowthSave;
 use economy::Scorecard;
 use growth::{AgencyParams, CostMatrix, GrowthParams, GrowthSim, Zone, ZoneId, Zones};
 use sim_core::{AgencyCommand, Handoff, Sim, Simulation};
@@ -93,6 +94,8 @@ pub struct TransitInput {
 pub struct Shared {
     pub costs: Mutex<Option<CostMatrix>>,
     pub transit: Mutex<Option<Arc<TransitInput>>>,
+    /// Latest saveable growth state, refreshed by the sim every SAVE_EVERY ticks (read by autosave).
+    pub save: Mutex<Option<GrowthSave>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +132,9 @@ pub fn scorecard(out: &TrafficOut, transit_capacity: f64) -> Scorecard {
     }
 }
 
+/// Ticks between refreshes of the autosave copy of the growth state (10 Hz sim: every 5 s).
+const SAVE_EVERY: u64 = 50;
+
 pub struct GrowthSimulation {
     plan: Arc<TownPlan>,
     sim: GrowthSim,
@@ -140,6 +146,27 @@ pub struct GrowthSimulation {
 }
 
 impl GrowthSimulation {
+    /// Saveable state at `tick` (the next tick to run).
+    pub fn export(&self, tick: u64) -> GrowthSave {
+        GrowthSave {
+            tick,
+            zones: self.sim.zones.0.iter().map(|z| (z.pop, z.jobs)).collect(),
+            built: self.builder.built.clone(),
+            pending: self.builder.pending.clone(),
+        }
+    }
+
+    /// Resume from a save made on the same map; a mismatched save is ignored.
+    pub fn restore(&mut self, g: &GrowthSave) {
+        if g.zones.len() != self.sim.zones.0.len() {
+            return;
+        }
+        for (z, (pop, jobs)) in self.sim.zones.0.iter_mut().zip(&g.zones) {
+            (z.pop, z.jobs) = (*pop, *jobs);
+        }
+        self.builder.restore(&self.plan, &g.built, &g.pending);
+    }
+
     pub fn new(zones: Zones, plan: Arc<TownPlan>, shared: Arc<Shared>) -> Self {
         let params = GrowthParams { rate: GROWTH_RATE, seed_pop: 10.0, ..GrowthParams::default() };
         // underserved-streak and plan lead scale with the growth cadence (one knob)
@@ -185,6 +212,9 @@ impl Simulation for GrowthSimulation {
             self.scorecard = scorecard(&self.traffic.out, transit.as_ref().map_or(0.0, |t| t.capacity));
         }
         self.road_reserve = self.builder.reserve(&self.plan);
+        if tick % SAVE_EVERY == 0 {
+            *self.shared.save.lock().unwrap() = Some(self.export(tick + 1));
+        }
     }
     fn snapshot(&self, tick: u64) -> GrowthSnapshot {
         let ne = self.plan.graph.edges.len();
@@ -255,9 +285,15 @@ impl Plugin for ZonesPlugin {
         let cp = CityPlan::new(plan_layout(seed, &cities));
         let geo = cp.plan.parcels.clone();
         let shared = Arc::new(Shared::default());
-        let sim_state = GrowthSimulation::new(zones_from(&geo), cp.plan.clone(), shared.clone());
+        let mut sim_state = GrowthSimulation::new(zones_from(&geo), cp.plan.clone(), shared.clone());
+        let saved = app.world().get_resource::<crate::persist::LoadedGame>().and_then(|l| l.0.as_ref()).map(|g| g.growth.clone());
+        if let Some(g) = &saved {
+            sim_state.restore(g);
+            *shared.save.lock().unwrap() = Some(g.clone());
+        }
         let initial_built = sim_state.builder.built.clone();
-        let (sim, _tx, snapshots) = Sim::new(sim_state);
+        let (mut sim, _tx, snapshots) = Sim::new(sim_state);
+        sim.tick = saved.map_or(0, |g| g.tick);
         #[cfg(not(target_arch = "wasm32"))]
         app.insert_resource(SimGuard(sim_core::SimThread::spawn(sim, sim_core::SIM_HZ)));
         #[cfg(target_arch = "wasm32")]
@@ -443,6 +479,21 @@ mod tests {
         let shared = Arc::new(Shared::default());
         *shared.costs.lock().unwrap() = Some(CostMatrix::from_fn(n, |i, j| if i == j { 0.0 } else { 3.0 }));
         (GrowthSimulation::new(zones_from(&p.parcels), p, shared), n)
+    }
+
+    #[test]
+    fn export_then_restore_resumes_the_same_city() {
+        let (mut a, _) = sim(5);
+        run(&mut a, 400);
+        let saved = a.export(400);
+        let (mut b, _) = sim(5);
+        b.restore(&saved);
+        assert_eq!(b.state_hash(), a.state_hash(), "restored city matches");
+        assert_eq!(b.export(400), saved);
+        // a save from another map is ignored rather than corrupting the sim
+        let (mut c, _) = sim(5);
+        c.restore(&GrowthSave { zones: vec![(1.0, 1.0)], ..saved.clone() });
+        assert_ne!(c.state_hash(), a.state_hash());
     }
 
     fn built(s: &GrowthSnapshot) -> usize {

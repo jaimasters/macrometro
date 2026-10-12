@@ -16,7 +16,13 @@ render_budget = { path = "../render_budget" }
 save = { path = "../save" }
 ui_tools = { path = "../ui_tools" }
 sound = { path = "../sound" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
 
 # System UI font for the HUD (native only; wasm keeps Bevy's built-in font).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bevy = { workspace = true, features = ["system_font_discovery"] }
+
+# Browser save slot (localStorage) and page reload for Reset.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location"] }

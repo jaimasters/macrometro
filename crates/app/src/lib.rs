@@ -11,6 +11,7 @@ mod station_menu;
 mod stations;
 mod capture;
 mod hud;
+mod persist;
 pub mod shell;
 mod terrain;
 mod zones;
@@ -28,6 +29,7 @@ impl PluginGroup for MacrometroPlugins {
         PluginGroupBuilder::start::<Self>()
             .add(sim_core::SimCorePlugin)
             .add(world_gen::WorldGenPlugin)
+            .add(persist::LoadPlugin)
             .add(transit::TransitPlugin)
             .add(growth::GrowthPlugin)
             .add(economy::EconomyPlugin)
@@ -45,6 +47,7 @@ impl PluginGroup for MacrometroPlugins {
             .add(station_menu::StationMenuPlugin)
             .add(sound::SoundPlugin)
             .add(hud::HudPlugin)
+            .add(persist::PersistPlugin)
             .add(capture::CapturePlugin)
     }
 }
