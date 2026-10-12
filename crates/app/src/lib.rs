@@ -12,6 +12,7 @@ mod stations;
 mod capture;
 mod hud;
 mod persist;
+mod lots;
 mod preview;
 mod segment_menu;
 pub mod shell;
@@ -46,6 +47,7 @@ impl PluginGroup for MacrometroPlugins {
             .add(ShellPlugin)
             .add(rails::RailsPlugin)
             .add(preview::PreviewPlugin)
+            .add(lots::LotsPlugin)
             .add(stations::StationsPlugin)
             .add(station_menu::StationMenuPlugin)
             .add(segment_menu::SegmentMenuPlugin)
