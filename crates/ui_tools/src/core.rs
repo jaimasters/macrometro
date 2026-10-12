@@ -12,10 +12,13 @@ pub enum ActiveTool {
     Pan,
     PlaceStation,
     DrawLine,
+    /// Bulldoze: click a station to remove it (also: right-click a station in any tool).
+    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolAction {
+    DeleteStation { cell: IVec2 },
     PlaceStation { cell: IVec2 },
     /// Station cells in travel order (>= 2).
     DrawLine { cells: Vec<IVec2> },
@@ -81,6 +84,22 @@ pub fn snap_station(stations: &[IVec2], p: Vec2) -> IVec2 {
         .min_by(|a, b| a.as_vec2().distance(p).total_cmp(&b.as_vec2().distance(p)))
         .copied()
         .unwrap_or_else(|| snap(p))
+}
+
+/// Station within `PICK_RADIUS` of `p`, if any (no grid fallback).
+pub fn station_at(stations: &[IVec2], p: Vec2) -> Option<IVec2> {
+    stations
+        .iter()
+        .filter(|s| s.as_vec2().distance(p) <= PICK_RADIUS)
+        .min_by(|a, b| a.as_vec2().distance(p).total_cmp(&b.as_vec2().distance(p)))
+        .copied()
+}
+
+/// Remove the station under `p`: returns the delete command and forgets the station.
+pub fn delete_at(stations: &mut Stations, agency: AgencyId, p: Vec2) -> Option<ToolCommand> {
+    let cell = station_at(&stations.0, p)?;
+    stations.0.retain(|s| *s != cell);
+    Some(ToolCommand { agency, action: ToolAction::DeleteStation { cell } })
 }
 
 /// Line-drag state: `from` is Some while the button is held after pressing on the map.
@@ -167,6 +186,15 @@ mod tests {
         let st = [IVec2::new(40, 40)];
         assert_eq!(snap_station(&st, Vec2::new(44.0, 38.0)), IVec2::new(40, 40));
         assert_eq!(snap_station(&st, Vec2::new(61.0, 38.0)), IVec2::new(60, 40));
+    }
+
+    #[test]
+    fn delete_removes_station_and_emits_command() {
+        let mut st = Stations(vec![IVec2::new(8, 8), IVec2::new(40, 8)]);
+        assert!(delete_at(&mut st, AgencyId(1), Vec2::new(100.0, 100.0)).is_none());
+        let c = delete_at(&mut st, AgencyId(1), Vec2::new(10.0, 9.0)).unwrap();
+        assert_eq!(c.action, ToolAction::DeleteStation { cell: IVec2::new(8, 8) });
+        assert_eq!(st.0, vec![IVec2::new(40, 8)]);
     }
 
     #[test]

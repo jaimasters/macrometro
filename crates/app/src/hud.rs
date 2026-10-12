@@ -10,6 +10,7 @@ use ui_tools::ActiveTool;
 const INK: Color = Color::srgb(0.12, 0.13, 0.16);
 const PANEL: Color = Color::srgba(1.0, 1.0, 1.0, 0.92);
 const SELECTED: Color = Color::srgb(0.80, 0.88, 1.0);
+const RED: Color = Color::srgb(0.85, 0.2, 0.25);
 const BLUE: Color = Color::srgb(0.15, 0.45, 0.90);
 const WELCOME_SECS: f32 = 12.0;
 
@@ -38,6 +39,7 @@ pub fn hint_for(tool: ActiveTool) -> &'static str {
         ActiveTool::Pan => "Drag the map to pan, scroll to zoom.",
         ActiveTool::PlaceStation => "Click the map to place a station.",
         ActiveTool::DrawLine => "Press on a station and drag to another to build a line.",
+        ActiveTool::Delete => "Click a station to remove it (right-click works in any tool).",
     }
 }
 
@@ -198,6 +200,11 @@ fn spawn_hud(mut commands: Commands) {
         p.spawn(dot(0.0, 5.0, 12.0));
         p.spawn(dot(16.0, 5.0, 12.0));
     });
+    let del = button(&mut commands, row, Some(ActiveTool::Delete), "Delete", "Delete tool (4): click a station to remove it, or right-click any station");
+    icon(&mut commands, del, |p| {
+        p.spawn((bar(2.0, 9.0, 24.0, 4.0, RED), Transform::from_rotation(Quat::from_rotation_z(0.785))));
+        p.spawn((bar(2.0, 9.0, 24.0, 4.0, RED), Transform::from_rotation(Quat::from_rotation_z(-0.785))));
+    });
     let snd = button(&mut commands, row, None, "Sound", "Sound: click to mute or unmute");
     icon(&mut commands, snd, |p| {
         for (i, h) in [8.0, 16.0, 22.0, 12.0].into_iter().enumerate() {
@@ -268,7 +275,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_distinct_hint() {
-        let h: Vec<_> = [ActiveTool::Pan, ActiveTool::PlaceStation, ActiveTool::DrawLine].map(hint_for).to_vec();
+        let h: Vec<_> = [ActiveTool::Pan, ActiveTool::PlaceStation, ActiveTool::DrawLine, ActiveTool::Delete].map(hint_for).to_vec();
         assert!(h.iter().all(|s| !s.is_empty() && s.len() < 80), "one-line hints");
         assert!(h[0] != h[1] && h[1] != h[2]);
     }

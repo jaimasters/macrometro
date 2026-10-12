@@ -188,3 +188,21 @@ fn plugin_publishes_costs_and_shares_to_growth() {
     assert_eq!(app.world().resource::<TransitErrors>().0.len(), 1);
     assert_eq!(app.world().resource::<TransitShares>().0.len(), 3);
 }
+
+#[test]
+fn remove_node_drops_segments_bridges_and_prunes_short_lines() {
+    // 0-1-2-3 line; removing interior node 1 bridges 0-2; removing the end node 3 shortens it.
+    let mut net = corridor(4, 10.0, RailClass::Tram, 0.0, true);
+    assert_eq!(net.apply(&cmd(AG, TransitAction::RemoveNode(NodeId(1)))), Ok(Applied::Removed));
+    assert!(net.edges.iter().all(|e| e.a != NodeId(1) && e.b != NodeId(1)));
+    assert_eq!(net.lines[0].stops, vec![NodeId(0), NodeId(2), NodeId(3)]);
+    let bridge = &net.edges[net.lines[0].segments[0]];
+    assert_eq!((bridge.kind, bridge.len), (EdgeKind::Rail, 20.0));
+    assert_eq!(net.lines[0].segments.len(), 2);
+    assert_eq!(net.apply(&cmd(OTHER, TransitAction::RemoveNode(NodeId(3)))), Err(TransitError::NotOwner));
+    net.apply(&cmd(AG, TransitAction::RemoveNode(NodeId(3)))).unwrap();
+    assert_eq!(net.lines[0].stops.len(), 2);
+    net.apply(&cmd(AG, TransitAction::RemoveNode(NodeId(0)))).unwrap();
+    assert!(net.lines.is_empty(), "line below 2 stops is removed");
+    assert_eq!(net.apply(&cmd(AG, TransitAction::RemoveNode(NodeId(99)))), Err(TransitError::UnknownNode(NodeId(99))));
+}

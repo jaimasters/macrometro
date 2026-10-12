@@ -62,6 +62,8 @@ fn select_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<ActiveTool>, mu
         ActiveTool::PlaceStation
     } else if keys.just_pressed(KeyCode::Digit3) {
         ActiveTool::DrawLine
+    } else if keys.just_pressed(KeyCode::Digit4) {
+        ActiveTool::Delete
     } else {
         return;
     };
@@ -75,7 +77,7 @@ fn pointer(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform)>>,
-    tool: Res<ActiveTool>,
+    mut tool: ResMut<ActiveTool>,
     agency: Res<ActiveAgency>,
     ground: Res<GroundHeight>,
     ui: Query<&Hovered>,
@@ -95,15 +97,28 @@ fn pointer(
             .filter(|_| !over_ui);
     }
     let hit = cursor_world.0;
+    // Right-click a station: delete it, whatever tool is active.
+    if mouse.just_pressed(MouseButton::Right) {
+        if let Some(c) = hit.and_then(|p| delete_at(&mut stations, agency.0, p)) {
+            out.write(c);
+        }
+    }
     if mouse.just_pressed(MouseButton::Left) {
         if let Some(p) = hit {
             match *tool {
                 ActiveTool::Pan => {}
+                ActiveTool::Delete => {
+                    if let Some(c) = delete_at(&mut stations, agency.0, p) {
+                        out.write(c);
+                        *tool = ActiveTool::Pan; // one-shot
+                    }
+                }
                 ActiveTool::PlaceStation => {
                     let cell = snap_station(&stations.0, p);
                     if !stations.0.contains(&cell) {
                         stations.0.push(cell);
                         out.write(ToolCommand { agency: agency.0, action: ToolAction::PlaceStation { cell } });
+                        *tool = ActiveTool::Pan; // one-shot
                     }
                 }
                 ActiveTool::DrawLine => {
@@ -123,6 +138,7 @@ fn pointer(
         if let Some(from) = drag.from.take() {
             if let Some(c) = finish_drag(&mut stations, agency.0, from, drag.to) {
                 out.write(c);
+                *tool = ActiveTool::Pan; // one-shot
             }
         }
     }
@@ -215,6 +231,15 @@ mod plugin_tests {
         app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Digit3);
         app.update();
         assert_eq!(*app.world().resource::<ActiveTool>(), ActiveTool::DrawLine);
+    }
+
+    #[test]
+    fn delete_tool_and_one_shot_revert_logic() {
+        let mut st = Stations(vec![IVec2::new(0, 0)]);
+        // finish_drag/delete_at are the units the one-shot hooks hang off; a no-op drag emits nothing.
+        assert!(finish_drag(&mut st, AgencyId(1), IVec2::ZERO, IVec2::ZERO).is_none());
+        assert!(delete_at(&mut st, AgencyId(1), Vec2::ZERO).is_some());
+        assert!(st.0.is_empty());
     }
 
     #[test]

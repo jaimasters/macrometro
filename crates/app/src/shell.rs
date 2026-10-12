@@ -64,6 +64,11 @@ pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> 
         n
     };
     match &cmd.action {
+        ToolAction::DeleteStation { cell } => {
+            if let Some(n) = map.by_cell.remove(cell) {
+                out.push(TransitCommand { agency, action: TransitAction::RemoveNode(n) });
+            }
+        }
         ToolAction::PlaceStation { cell } => {
             node(*cell, &mut out, &mut fresh);
         }
@@ -90,8 +95,47 @@ struct ToolVisuals {
     lines: Vec<Handle<StandardMaterial>>,
 }
 
+/// Player lines as station cells (mirrors transit; used to redraw after deletions).
 #[derive(Resource, Default)]
-struct LineCount(usize);
+pub struct Lines {
+    next: usize,
+    pub all: Vec<LineRec>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineRec {
+    pub id: usize,
+    pub cells: Vec<IVec2>,
+}
+
+impl Lines {
+    pub fn add(&mut self, cells: Vec<IVec2>) -> usize {
+        self.next += 1;
+        self.all.push(LineRec { id: self.next - 1, cells });
+        self.next - 1
+    }
+
+    /// Drop `cell` from every line; lines left with < 2 stops are removed.
+    /// Returns ids of lines that changed (including removed ones).
+    pub fn remove_station(&mut self, cell: IVec2) -> Vec<usize> {
+        let mut changed = vec![];
+        for l in &mut self.all {
+            if l.cells.contains(&cell) {
+                l.cells.retain(|c| *c != cell);
+                changed.push(l.id);
+            }
+        }
+        self.all.retain(|l| l.cells.len() >= 2);
+        changed
+    }
+}
+
+#[derive(Component)]
+struct StationVisual(IVec2);
+
+/// Everything drawn for one line (strokes, joints, trains); despawned on change.
+#[derive(Component)]
+struct LineVisual(usize);
 
 /// A train shuttling back and forth along a line's route (visual marker; not simulated load).
 #[derive(Component)]
@@ -130,7 +174,7 @@ impl Plugin for ShellPlugin {
             e.0.add_agency(PLAYER, 0.5);
         }
         app.insert_resource(StationMap::new(first_free))
-            .init_resource::<LineCount>()
+            .init_resource::<Lines>()
             .insert_resource(ActiveAgency(PLAYER))
             .add_systems(Startup, setup_visuals)
             .add_systems(Update, (apply_tool_commands, move_trains, stub_metrics));
@@ -150,17 +194,51 @@ fn setup_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut m
     });
 }
 
+fn spawn_line(commands: &mut Commands, vis: &ToolVisuals, rec: &LineRec) {
+    let mat = vis.lines[rec.id % vis.lines.len()].clone();
+    let path = route(&rec.cells);
+    for w in path.windows(2) {
+        commands.spawn((
+            LineVisual(rec.id),
+            Mesh3d(vis.cuboid.clone()),
+            MeshMaterial3d(mat.clone()),
+            segment_transform(w[0], w[1], Y_LINE, LINE_WIDTH, 0.3),
+        ));
+    }
+    for p in &path {
+        // round joints so bends are clean
+        commands.spawn((
+            LineVisual(rec.id),
+            Mesh3d(vis.cylinder.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_xyz(p.x, Y_LINE, p.y).with_scale(Vec3::new(LINE_WIDTH / 2.0, 0.3, LINE_WIDTH / 2.0)),
+        ));
+    }
+    let len = path_len(&path);
+    for dist in [0.0, len] {
+        commands.spawn((
+            LineVisual(rec.id),
+            Train { path: path.clone(), dist, line: rec.id, leg: 0 },
+            Mesh3d(vis.capsule.clone()),
+            MeshMaterial3d(vis.train.clone()),
+            Transform::from_xyz(path[0].x, Y_TRAIN, path[0].y),
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_tool_commands(
     mut cmds: MessageReader<ToolCommand>,
     mut transit: ResMut<TransitCommands>,
     mut map: ResMut<StationMap>,
-    mut lines: ResMut<LineCount>,
+    mut lines: ResMut<Lines>,
     layout: Res<ZoneLayout>,
     cam: Option<Res<MapCam>>,
     vis: Option<Res<ToolVisuals>>,
     mut spend: ResMut<SpendQueue>,
     mut sound: MessageWriter<SoundEvent>,
+    stations: Query<(Entity, &StationVisual)>,
+    line_visuals: Query<(Entity, &LineVisual)>,
     mut commands: Commands,
 ) {
     let Some(vis) = vis else { return };
@@ -169,9 +247,26 @@ fn apply_tool_commands(
     for c in cmds.read() {
         let (tc, fresh) = to_transit(c, &mut map, &centres);
         transit.0.extend(tc);
+        if let ToolAction::DeleteStation { cell } = &c.action {
+            for (e, v) in &stations {
+                if v.0 == *cell {
+                    commands.entity(e).despawn();
+                }
+            }
+            let changed = lines.remove_station(*cell);
+            for (e, v) in &line_visuals {
+                if changed.contains(&v.0) {
+                    commands.entity(e).despawn();
+                }
+            }
+            for rec in lines.all.iter().filter(|l| changed.contains(&l.id)) {
+                spawn_line(&mut commands, &vis, rec);
+            }
+            continue;
+        }
         let route_len = match &c.action {
-            ToolAction::PlaceStation { .. } => 0.0,
             ToolAction::DrawLine { cells } => path_len(&route(cells)) as f64,
+            _ => 0.0,
         };
         let amount = STATION_COST * fresh.len() as f64 + COST_PER_LEN * route_len;
         if amount > 0.0 {
@@ -181,6 +276,7 @@ fn apply_tool_commands(
             let p = cell.as_vec2();
             for (mat, r, y) in [(&vis.station_out, 5.4, Y_STATION_OUT), (&vis.station, 3.9, Y_STATION)] {
                 commands.spawn((
+                    StationVisual(cell),
                     Mesh3d(vis.cylinder.clone()),
                     MeshMaterial3d(mat.clone()),
                     Transform::from_xyz(p.x, y, p.y).with_scale(Vec3::new(r, 0.3, r)),
@@ -189,35 +285,10 @@ fn apply_tool_commands(
             sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: cell.x / 4 + cell.y / 4, pan: pan(p) });
         }
         if let ToolAction::DrawLine { cells } = &c.action {
-            let line = lines.0;
-            lines.0 += 1;
-            let mat = vis.lines[line % vis.lines.len()].clone();
-            let path = route(cells);
-            for w in path.windows(2) {
-                commands.spawn((
-                    Mesh3d(vis.cuboid.clone()),
-                    MeshMaterial3d(mat.clone()),
-                    segment_transform(w[0], w[1], Y_LINE, LINE_WIDTH, 0.3),
-                ));
-            }
-            for p in &path {
-                // round joints so bends are clean
-                commands.spawn((
-                    Mesh3d(vis.cylinder.clone()),
-                    MeshMaterial3d(mat.clone()),
-                    Transform::from_xyz(p.x, Y_LINE, p.y).with_scale(Vec3::new(LINE_WIDTH / 2.0, 0.3, LINE_WIDTH / 2.0)),
-                ));
-            }
-            let len = path_len(&path);
-            for dist in [0.0, len] {
-                commands.spawn((
-                    Train { path: path.clone(), dist, line, leg: 0 },
-                    Mesh3d(vis.capsule.clone()),
-                    MeshMaterial3d(vis.train.clone()),
-                    Transform::from_xyz(path[0].x, Y_TRAIN, path[0].y),
-                ));
-            }
-            sound.write(SoundEvent { kind: SoundKind::LineCreated, pitch: line as i32, pan: pan(path[0]) });
+            let id = lines.add(cells.clone());
+            let rec = lines.all.last().unwrap().clone();
+            spawn_line(&mut commands, &vis, &rec);
+            sound.write(SoundEvent { kind: SoundKind::LineCreated, pitch: id as i32, pan: pan(route(cells)[0]) });
         }
     }
 }
@@ -287,6 +358,32 @@ mod tests {
         assert_eq!(ping_pong(&p, 25.0), Vec2::new(10.0, 5.0));
         assert_eq!(ping_pong(&p, 40.0), Vec2::ZERO);
         assert_eq!(ping_pong(&[], 3.0), Vec2::ZERO);
+    }
+
+    #[test]
+    fn deleting_station_updates_lines_and_transit() {
+        let centres = [Vec2::ZERO];
+        let mut m = StationMap::new(1);
+        let (a, b, c3) = (IVec2::new(0, 12), IVec2::new(40, 12), IVec2::new(80, 12));
+        let mut net = transit::Network::default();
+        net.apply(&TransitCommand { agency: AgencyId(0), action: TransitAction::AddNode }).unwrap();
+        let (v, _) = to_transit(&cmd(1, ToolAction::DrawLine { cells: vec![a, b] }), &mut m, &centres);
+        let (v2, _) = to_transit(&cmd(1, ToolAction::DrawLine { cells: vec![b, c3] }), &mut m, &centres);
+        for t in v.iter().chain(&v2) {
+            net.apply(t).unwrap();
+        }
+        let mut lines = Lines::default();
+        lines.add(vec![a, b]);
+        lines.add(vec![b, c3]);
+        // delete the shared middle station: both lines drop below 2 stops
+        let (d, _) = to_transit(&cmd(1, ToolAction::DeleteStation { cell: b }), &mut m, &centres);
+        assert_eq!(d.len(), 1);
+        net.apply(&d[0]).unwrap();
+        assert!(net.lines.is_empty());
+        assert_eq!(lines.remove_station(b), vec![0, 1]);
+        assert!(lines.all.is_empty());
+        // deleting an unknown station emits nothing
+        assert!(to_transit(&cmd(1, ToolAction::DeleteStation { cell: b }), &mut m, &centres).0.is_empty());
     }
 
     #[test]

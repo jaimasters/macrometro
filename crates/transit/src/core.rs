@@ -104,6 +104,9 @@ pub enum TransitAction {
     AddEdge { a: NodeId, b: NodeId, len: f64, kind: EdgeKind },
     AddLine { class: RailClass, stops: Vec<NodeId>, alignment_mismatch: f64 },
     RemoveLine(LineId),
+    /// Bulldoze a station: drops every edge touching it and removes it from lines (a line left with <2 stops
+    /// is removed; a mid-line removal is bridged by a new rail edge). Node ids stay stable (the node is orphaned).
+    RemoveNode(NodeId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -182,6 +185,41 @@ impl Network {
                     return Err(TransitError::NotOwner);
                 }
                 self.lines.remove(i);
+                Ok(Applied::Removed)
+            }
+            TransitAction::RemoveNode(n) => {
+                self.check(*n)?;
+                let touching = |e: &Edge| e.a == *n || e.b == *n;
+                if self.edges.iter().any(|e| touching(e) && e.owner != c.agency) {
+                    return Err(TransitError::NotOwner);
+                }
+                // Bridge mid-line gaps first so the line stays connected.
+                let mut bridges = vec![];
+                for l in self.lines.iter().filter(|l| l.owner == c.agency) {
+                    if let Some(i) = l.stops.iter().position(|s| s == n).filter(|i| *i > 0 && *i + 1 < l.stops.len()) {
+                        let (p, q) = (l.stops[i - 1], l.stops[i + 1]);
+                        let len: f64 = l.segments[i - 1..=i].iter().map(|&s| self.edges[s].len).sum();
+                        bridges.push(Edge { a: p, b: q, len, kind: EdgeKind::Rail, owner: c.agency });
+                    }
+                }
+                self.edges.extend(bridges);
+                self.edges.retain(|e| !touching(e));
+                for l in &mut self.lines {
+                    l.stops.retain(|s| s != n);
+                }
+                self.lines.retain(|l| l.stops.len() >= 2);
+                let edges = &self.edges;
+                for l in &mut self.lines {
+                    l.segments = l
+                        .stops
+                        .windows(2)
+                        .filter_map(|w| {
+                            edges.iter().position(|e| {
+                                e.kind == EdgeKind::Rail && ((e.a, e.b) == (w[0], w[1]) || (e.a, e.b) == (w[1], w[0]))
+                            })
+                        })
+                        .collect();
+                }
                 Ok(Applied::Removed)
             }
         }
