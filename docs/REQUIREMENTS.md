@@ -23,5 +23,5 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | R16 | Kinematics | Accel, braking, headway spacing | C1+C2 / mgr-city | Requested | |
 | R17 | Curve radius, eminent domain | Arc curves, radius upgrade demolishes at cost | C1+C2 / mgr-city | Requested | |
 | R18 | Level crossings, bridges, underpasses cost money | Each crossing type priced | C1+C2 / mgr-city | Requested | |
-| R19 | "game is quite laggy" | Frame time before/after reported from live session | mgr-perf | In progress | |
+| R19 | "game is quite laggy" | Frame time before/after reported from live session | mgr-perf | In progress (logging merged) | 1bd7846 |
 | R20 | Requirements tracker with delivery status | This file kept current on every merge | orchestrator | Merged (not seen on screen) | this commit |
