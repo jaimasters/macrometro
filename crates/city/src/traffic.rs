@@ -126,6 +126,12 @@ impl Traffic {
         }
     }
 
+    /// R24: set edge `e` to a lane class (capacity and free-flow time follow it).
+    pub fn set_lane_class(&mut self, e: usize, c: crate::lanes::LaneClass) {
+        self.cap[e] = c.capacity();
+        self.t0[e] = self.len[e] / c.speed();
+    }
+
     /// Level crossings: `closed[e]` = share of time edge `e` is shut while a train passes (missing = open).
     pub fn set_closure(&mut self, closed: &[f32]) {
         for (c, i) in self.closed.iter_mut().zip(0..) {
@@ -319,6 +325,17 @@ mod tests {
             night.assign(&built, &z_heavy, None, 3.0);
         }
         assert!(night.out.mean_trip_time < heavy.out.mean_trip_time);
+    }
+
+    #[test]
+    fn widening_a_road_cuts_its_travel_time_and_congestion() {
+        let (plan, z, built) = setup(0.6);
+        let mut t = Traffic::new(&plan);
+        settle(&mut t, &built, &z, None);
+        let busiest = (0..t.flow.len()).max_by(|&a, &b| t.flow[a].total_cmp(&t.flow[b])).unwrap();
+        let (vc0, t0) = (t.vc(busiest), t.edge_time(busiest));
+        t.set_lane_class(busiest, crate::lanes::LaneClass::SixLane);
+        assert!(t.vc(busiest) < vc0 && t.edge_time(busiest) < t0);
     }
 
     #[test]

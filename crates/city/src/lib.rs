@@ -1,5 +1,6 @@
 //! Procedural towns: road graph generation, road growth, traffic and mode choice. Pure Rust (no ECS).
 //! Spec: docs/features/city/SPEC.md; design: docs/arch/city-gen.md.
+pub mod lanes;
 pub mod placer;
 pub mod roadbuild;
 pub mod roadgen;
