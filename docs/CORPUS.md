@@ -61,12 +61,13 @@ C2 / R21 placement preview: while a line is dragged (or extended), run the place
 
 ## crates/app/src/rails.rs
 Player lines drawn as rails (N thin parallel rails per segment when zoomed in, one thick stroke when zoomed
+- const LINE_WIDTH
 - const RAIL_PITCH
 - const RAIL_VIEW
 - fn load_colour
-- fn offset_path
 - fn point_at
 - fn rail_offset
+- fn track_body
 - struct LineVisual
 - struct RailsPlugin
 - struct Trains
@@ -143,6 +144,7 @@ Station presentation: flat platform footprints (rounded bars along the serving l
 - enum Tier
 - fn crowding_colour
 - fn crowding_stub
+- fn footprint
 - fn groups
 - fn marker_size
 - fn platform_len
@@ -150,6 +152,7 @@ Station presentation: flat platform footprints (rounded bars along the serving l
 - fn platform_pitch
 - fn platform_width
 - fn tier
+- fn track_width
 - struct Group
 - struct SelectedStation
 - struct StationsPlugin
@@ -273,3 +276,438 @@ Rail track placement (R21, C1): auto-routes a track between two stations as circ
 - struct Placement
 
 ## crates/city/src/placer_tests.rs
+
+## crates/city/src/roadbuild.rs
+City road growth (D-7). The city reserves budget and builds the planned road graph outward as the town develops:
+- const BUILT_POP
+- const LEAD_TICKS
+- const ROADS_PER_RATE
+- const ROAD_COST_PER_LEN
+- fn built_count
+- fn hash
+- fn is_built
+- fn new
+- fn reserve
+- fn restore
+- fn step
+- struct RoadBuilder
+
+## crates/city/src/roadgen.rs
+Procedural town generator: terrain-cost arterials + tensor-field local streets + access-based parcels.
+- const MAX_BRIDGE
+- const PEAK_CAPACITY
+- const SEED_ORDER
+- enum RoadClass
+- enum SeedKind
+- enum ZoneKind
+- fn access_node
+- fn colour
+- fn footprint_on_land
+- fn fronting
+- fn incident
+- fn is_land
+- fn name
+- fn plan_towns
+- fn pos
+- fn seg_closest
+- fn seg_dist
+- fn water_run
+- struct Parcel
+- struct REdge
+- struct RoadGraph
+- struct TownMeta
+- struct TownPlan
+
+## crates/city/src/roadgen_tests.rs
+
+## crates/city/src/traffic.rs
+Traffic and mode choice over the generated road graph.
+- const CAP_ARTERIAL
+- const CAP_LOCAL
+- const CAR_BIAS
+- const DAY_TICKS
+- const MAX_SLOWDOWN
+- const MODE_BETA
+- const SPEED_ARTERIAL
+- const SPEED_LOCAL
+- const TRAFFIC_EVERY
+- fn assign
+- fn car_time
+- fn edge_time
+- fn free_time
+- fn hour_of
+- fn new
+- fn p_transit
+- fn set_closure
+- fn set_lane_class
+- fn shop_profile
+- fn slowdown
+- fn transit_share
+- fn vc
+- fn work_profile
+- struct Traffic
+- struct TrafficOut
+
+## crates/city/src/transit_times.rs
+Door-to-door transit travel time between zones over the player's rail network:
+- const ACCESS_SPEED
+- const MAX_ACCESS
+- const RAIL_SCALE
+- const WAIT_MIN
+- fn transit_times
+- struct StationPos
+
+## crates/city/src/trips.rs
+Car journeys (R28): a trip is sampled from the same demand model as the traffic assignment (home zones by
+- fn active
+- fn driveway_foot
+- fn new
+- fn route
+- fn sample
+- struct Router
+- struct Trip
+
+## crates/economy/src/core.rs
+Pure-Rust economy core: agencies, scorecards, budgets, soft conditions, standing, land cost. No bevy.
+- enum Category
+- enum Cell
+- enum EconError
+- fn add_agency
+- fn build_cost
+- fn close_period
+- fn land_cost
+- fn land_value
+- fn new
+- fn next_budget
+- fn performance
+- fn record_spend
+- fn reserve
+- fn shortfall
+- struct AgencyBudget
+- struct AgencyState
+- struct Budget
+- struct EconomyParams
+- struct EconomyState
+- struct LandParams
+- struct Scorecard
+- struct SoftCondition
+
+## crates/economy/src/lib.rs
+Budgets, soft conditions, political standing, land cost; agencies are entities keyed by AgencyId.
+- struct CarShare
+- struct CurrentBudget
+- struct Economy
+- struct EconomyPlugin
+- struct PeriodClock
+- struct RoadDemand
+- struct Scorecards
+- struct SpendCommand
+- struct SpendErrors
+- struct SpendQueue
+
+## crates/economy/src/tests.rs
+
+## crates/growth/src/agency.rs
+City road agency (D-7): underserved zones -> RoadPlan one cycle ahead + road_reserve. Pure, deterministic.
+- fn new
+- fn observe
+- fn pending
+- struct AgencyOutput
+- struct AgencyParams
+- struct RoadAgency
+- struct RoadPlan
+
+## crates/growth/src/agency_tests.rs
+
+## crates/growth/src/core.rs
+Pure-Rust growth core: zones, cost matrix, accessibility, gravity OD flows, growth deltas. No bevy.
+- fn accessibility
+- fn apply_deltas
+- fn from_fn
+- fn get
+- fn gravity_flows
+- fn growth_deltas
+- fn hash_f64s
+- fn new
+- fn row_sum
+- fn set
+- fn state_hash
+- fn step
+- fn total
+- struct CostMatrix
+- struct Flows
+- struct GrowthParams
+- struct GrowthSim
+- struct GrowthStep
+- struct Zone
+- struct ZoneDelta
+- struct ZoneId
+- struct Zones
+
+## crates/growth/src/lib.rs
+Zone-level demand, reachability-driven growth and sprawl.
+- struct Accessibility
+- struct Costs
+- struct Growth
+- struct GrowthPlugin
+
+## crates/growth/src/tests.rs
+
+## crates/growth/src/tests_gravity.rs
+
+## crates/render_budget/src/lib.rs
+Monitor-locked frame pacing with prioritised, deferrable render work.
+- enum Priority
+- struct RenderBudgetPlugin
+
+## crates/save/src/bin/gen-scenarios.rs
+`cargo run -p save --bin gen-scenarios -- --seed N [--out DIR]` writes DIR/{fresh,mid_growth,sprawl_crisis}.ron.
+
+## crates/save/src/format.rs
+Save data model (RON, serde). Generated terrain is NOT stored: it regenerates from `seed`.
+- const CURRENT_VERSION
+- const MAGIC
+- fn new
+- struct ChunkOverride
+- struct CitySave
+- struct Header
+- struct LineSave
+- struct MetricsSave
+- struct NetworkSave
+- struct RegionSave
+- struct SaveFile
+- struct WorldSection
+- struct ZoneSave
+
+## crates/save/src/lib.rs
+Versioned world save format, loader and seeded scenario generator.
+- mod format
+- mod loader
+- mod scenario
+- struct SavePlugin
+
+## crates/save/src/loader.rs
+Serialise / load with version-gated migrations.
+- const MIGRATIONS
+- enum LoadError
+- fn from_ron
+- fn load_with
+- fn to_ron
+- type Migration
+
+## crates/save/src/scenario.rs
+Seeded scenario generator. world_gen data is real; the sim run is a STUB: zones/lines/metrics are synthesised
+- const ALL
+- enum Scenario
+- fn generate
+- fn name
+
+## crates/sim_core/src/core.rs
+Pure-Rust sim core: fixed clock, command queue, snapshot handoff, sim thread. No bevy.
+- const SIM_HZ
+- enum Command
+- fn advance
+- fn alpha
+- fn by
+- fn command_channel
+- fn fnv1a
+- fn latest
+- fn new
+- fn next_f64
+- fn next_u64
+- fn period
+- fn publish
+- fn pump
+- fn spawn
+- fn stop
+- fn tick_once
+- struct AgencyCommand
+- struct AgencyId
+- struct CoreSim
+- struct CoreSnapshot
+- struct FixedClock
+- struct Handoff
+- struct SeededRng
+- struct Sim
+- struct SimThread
+- trait Simulation
+- type CommandQueue
+- type CommandSender
+
+## crates/sim_core/src/lib.rs
+Fixed-step simulation clock on worker threads and snapshot handoff to render.
+- struct SimCorePlugin
+- struct SimLink
+- struct SimTick
+
+## crates/sim_core/src/tests.rs
+
+## crates/sound/src/lib.rs
+Mini Metro-style generative soundscape. Other crates write `SoundEvent`;
+- const MAX_VOICES
+- const RATE
+- const SCALE
+- enum SoundKind
+- fn admit
+- fn quantise
+- fn render_tone
+- struct SoundEvent
+- struct SoundPlugin
+- struct SoundSettings
+- struct Tone
+- struct ToneDecoder
+
+## crates/transit/src/core.rs
+Pure-Rust transit core: rail+road graph, lines, RailClass mismatch penalty (D-9), zone cost matrix. No bevy.
+- const MAX_MISMATCH_PENALTY
+- const MAX_PLATFORMS
+- const MAX_TRACKS
+- const TRACK_COST_PER_LEN
+- enum Applied
+- enum CrossingKind
+- enum EdgeKind
+- enum RailClass
+- enum TransitAction
+- enum TransitError
+- fn apply
+- fn class_profile
+- fn cost_matrix
+- fn effective_capacity
+- fn effective_speed
+- fn looped
+- fn mismatch_penalty
+- fn new
+- fn penalty
+- fn platform_count
+- fn rail_edge
+- fn spacing
+- fn speed
+- fn track_cost_between
+- fn transit_shares
+- fn upgrade_cost
+- struct Crossing
+- struct Edge
+- struct Line
+- struct LineId
+- struct NetParams
+- struct Network
+- struct NodeId
+- struct TransitCommand
+
+## crates/transit/src/lib.rs
+Rail and road networks; lines with specialisation attributes. Supplies growth::Costs and per-zone transit shares.
+- mod trains
+- struct TransitCommands
+- struct TransitErrors
+- struct TransitNet
+- struct TransitPlugin
+- struct TransitShares
+- struct ZoneNodes
+
+## crates/transit/src/tests.rs
+
+## crates/transit/src/trains.rs
+Deterministic fixed-step train sim (C1). Pure f64, no bevy, no RNG: one `step` = one `DT`, trains update in id order
+- const DT
+- const HEADWAY
+- const MAX_EXTRA_TRAINS
+- const MIN_GAP
+- const SIDING_CAPACITY
+- const STOP_EPS
+- const TRAIN_CAPACITY
+- enum Phase
+- fn add_siding
+- fn add_train
+- fn level_crossings_occupied
+- fn line_total
+- fn on_platform
+- fn parked_at
+- fn route_pos
+- fn siding_free
+- fn step
+- fn sync
+- fn take_closure
+- fn tracks_under
+- fn train_type
+- fn waiting_at
+- struct Train
+- struct TrainSim
+- struct TrainType
+
+## crates/transit/src/trains_tests.rs
+
+## crates/ui_tools/src/core.rs
+Pure tool logic: commands, ray picking, snapping, line-drag, octilinear routing, ghost geometry.
+- const GRID
+- const PICK_RADIUS
+- enum ActiveTool
+- enum ToolAction
+- fn delete_at
+- fn finish_drag
+- fn finish_extend
+- fn octilinear
+- fn path_len
+- fn ray_terrain
+- fn route
+- fn segment_transform
+- fn snap
+- fn snap_station
+- fn station_at
+- struct ExtendState
+- struct GhostRoads
+- struct LineDrag
+- struct LineExtend
+- struct Stations
+- struct ToolCommand
+
+## crates/ui_tools/src/lib.rs
+Player tools: line drawing, station placement, macro line policies, micro edits.
+- const Y_GHOST
+- const Y_PREVIEW
+- struct ActiveAgency
+- struct CursorWorld
+- struct DragPreview
+- struct GroundHeight
+- struct RoadGhost
+- struct UiToolsPlugin
+
+## crates/world_gen/src/chunk.rs
+Chunk addressing and per-chunk height field. Chunks are views of the world function, so neighbours always agree.
+- const CHUNK_SIZE
+- fn chunk_hash
+- fn chunk_heights
+- fn from_cell
+- fn new
+- fn origin_cell
+- struct ChunkCoord
+
+## crates/world_gen/src/city.rs
+City regions: deterministic placement on a coarse super-grid, one candidate per super-cell.
+- fn chunks
+- fn contains
+- fn generate_cities
+- struct CityId
+- struct CityRegion
+
+## crates/world_gen/src/lib.rs
+Generative, infinitely scaling world: chunk addressing, terrain, linked cities.
+- mod rng
+- struct Cities
+- struct WorldGenPlugin
+- struct WorldSeed
+
+## crates/world_gen/src/rng.rs
+Seeded, platform-independent hashing/RNG. No external RNG: output must never change across builds.
+- fn below
+- fn hash3
+- fn mix
+- fn new
+- fn next_u64
+- fn unit
+- struct SplitMix64
+
+## crates/world_gen/src/terrain.rs
+Deterministic terrain height: value-noise fBm over world cell coordinates. Pure; f64 add/mul only.
+- const SEA_LEVEL
+- fn height
+
