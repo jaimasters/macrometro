@@ -20,3 +20,6 @@ Crate: crates/growth (pub API = lib.rs only). Pure-Rust core in src/core.rs (no 
 - plugin_step_changes_zones (bevy App with MinimalPlugins, one FixedUpdate run)
 ## City road agency (D-7)
 - Zone underserved (transit share < s_min for T ticks) -> city adds road plan + increases road_reserve (consumed by economy). Plans emitted one cycle ahead as RoadPlan events for UI ghosts. Deterministic test required.
+## City road agency (D-7) tests
+- agency.rs `RoadAgency::observe(tick,&zones,&shares)->AgencyOutput{planned,due,road_reserve}`; transit supplies shares.
+- underserved_for_t_ticks_emits_plan_ahead, road_reserve_tracks_pending_then_clears_when_due, recovery_resets_streak_and_no_duplicate_while_pending, agency_deterministic

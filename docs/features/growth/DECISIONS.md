@@ -6,3 +6,4 @@
 - D-4 | 2026-10-12 | Growth saturates: A/(A+k) * land_avail * crowd factor; pure per-zone fn, deltas merged sorted by ZoneId | growth-drivers.md; parallel-safe, deterministic | exponential growth unbounded
 - D-5 | 2026-10-12 | Transit share, auto-roads trigger, chunk placement out of scope this pass | need transit/world_gen interfaces | stubbing them
 - D-6 | 2026-10-12 | growth independent of sim_core; app wires GrowthSim into a sim_core Simulation | no cross-crate dependency | growth depends on sim_core
+- D-7 | 2026-10-12 | RoadAgency takes transit shares as input slice; plan emitted at tick, built at tick+lead; road_reserve = cost of pending plans; zone with pending plan can't re-plan | decoupled from transit; one-cycle-ahead ghosts | duplicate plans per zone

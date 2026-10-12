@@ -2,7 +2,9 @@
 //! Spec: docs/features/growth/SPEC.md. Pure core in `core`; this file is the bevy plugin.
 use bevy::prelude::*;
 
+mod agency;
 mod core;
+pub use agency::*;
 pub use core::*;
 
 /// Growth state in the ECS (transit writes `Costs`; growth reads it).

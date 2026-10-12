@@ -18,3 +18,5 @@ Crate: crates/sim_core (pub API = lib.rs only). Pure-Rust core in src/core.rs (n
 - thread_matches_direct_stepping (thread snapshot at tick N has hash == directly stepped hash at N), thread_stop_joins
 - pump_budget_limits_ticks
 - plugin_updates_simtick (bevy App update reads latest snapshot into SimTick)
+## Agencies (D-8)
+- `AgencyId(u32)` defined in sim_core; every command is an `AgencyCommand{agency,cmd}` (`cmd.by(agency)`); `Simulation::apply(&AgencyCommand)`. Test: identical_command_streams_identical_hashes.
