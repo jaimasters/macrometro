@@ -21,9 +21,26 @@ const Y_GAUGE: f32 = 3.6;
 pub const LABEL_VIEW_MAX: f32 = 150.0;
 /// Screen pixels kept free at the bottom for the palette and hint.
 const TOOLBAR_CLEAR: f32 = 130.0;
-/// Stations/platforms are enlarged on zoom-out so they stay readable (1.0 at/below this view height).
-const ZOOM_REF: f32 = 160.0;
 const WIDTH: f32 = 3.6;
+/// Zoom tiers (view height): above FAR_VIEW a transit-map marker, above NEAR_VIEW a compact platform, else the full island.
+pub const FAR_VIEW: f32 = 150.0;
+pub const NEAR_VIEW: f32 = 60.0;
+
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Far,
+    Mid,
+    Near,
+}
+
+pub fn tier(view_h: f32) -> Tier {
+    if view_h > FAR_VIEW { Tier::Far } else if view_h > NEAR_VIEW { Tier::Mid } else { Tier::Near }
+}
+
+/// Far-marker diameter in world units: about a line wide, growing with the view but never huge.
+pub fn marker_size(view_h: f32) -> f32 {
+    (view_h * 0.022).clamp(3.2, 7.0)
+}
 
 /// Width of one platform bar: slimmer when a station has several side by side.
 pub fn platform_width(n: u8) -> f32 {
@@ -105,6 +122,10 @@ struct StationRoot(#[allow(dead_code)] IVec2);
 #[derive(Component)]
 struct Ring(IVec2);
 #[derive(Component)]
+struct MarkerRing;
+#[derive(Component)]
+struct MarkerFill;
+#[derive(Component)]
 struct GaugeFill {
     cell: IVec2,
     dir: Vec2,
@@ -120,6 +141,7 @@ struct Label {
 struct Mats {
     ink: Handle<StandardMaterial>,
     stub: Handle<StandardMaterial>,
+    white: Handle<StandardMaterial>,
     track: Handle<StandardMaterial>,
     gauge: [Handle<StandardMaterial>; 3],
     ring_hover: Handle<StandardMaterial>,
@@ -142,6 +164,7 @@ fn setup_mats(mut commands: Commands, mut m: ResMut<Assets<StandardMaterial>>) {
     commands.insert_resource(Mats {
         ink: flat(INK),
         stub: flat(STUB),
+        white: flat(Color::WHITE),
         track: flat(Color::srgb(0.20, 0.21, 0.25)),
         gauge: [flat(crowding_colour(0.0)), flat(crowding_colour(0.7)), flat(crowding_colour(1.0))],
         ring_hover: flat(Color::srgb(1.0, 1.0, 1.0)),
@@ -278,6 +301,39 @@ fn rebuild(
                 ))
                 .id(),
         );
+        for k in &kids {
+            commands.entity(*k).insert(Tier::Near);
+        }
+        let ga = gs[0].angle;
+        let gdir = Vec2::new(ga.cos(), ga.sin());
+        let gperp = Vec2::new(-gdir.y, gdir.x);
+        let block = np as f32 * platform_pitch(np) - 1.8;
+        // near: two rails with sleepers either side of the platform block (the island sits between the two tracks)
+        let cube = meshes.add(Cuboid::new(1.0, 0.1, 1.0));
+        let rot = Quat::from_rotation_y(-ga);
+        for side in [-1.0f32, 1.0] {
+            let off = side * (block / 2.0 + 2.2);
+            for r in [-0.3f32, 0.3] {
+                let o = gperp * (off + r);
+                kids.push(commands.spawn((Tier::Near, Mesh3d(cube.clone()), MeshMaterial3d(mats.ink.clone()), Transform { translation: Vec3::new(o.x, Y_FILL - 0.1, o.y), rotation: rot, scale: Vec3::new(len + 6.0, 1.0, 0.18) })).id());
+            }
+            let mut d = -(len + 6.0) / 2.0;
+            while d <= (len + 6.0) / 2.0 {
+                let o = gdir * d + gperp * off;
+                kids.push(commands.spawn((Tier::Near, Mesh3d(cube.clone()), MeshMaterial3d(mats.track.clone()), Transform { translation: Vec3::new(o.x, Y_FILL - 0.15, o.y), rotation: rot, scale: Vec3::new(0.35, 1.0, 1.4) })).id());
+                d += 1.4;
+            }
+        }
+        // mid: one compact platform rectangle along the track
+        let mid_len = platform_len(level) + 1.0;
+        let mo = meshes.add(Capsule2d::new(1.0, (mid_len - 2.0).max(0.01)));
+        kids.push(commands.spawn((Tier::Mid, Visibility::Hidden, Mesh3d(mo.clone()), MeshMaterial3d(mats.ink.clone()), { let mut t = pose(Vec3::new(0.0, Y_OUTLINE, 0.0), ga); t.scale = Vec3::new(1.0, 1.0, 1.0); t })).id());
+        let mi = meshes.add(Capsule2d::new(0.7, (mid_len - 2.0).max(0.01)));
+        kids.push(commands.spawn((Tier::Mid, Visibility::Hidden, Mesh3d(mi), MeshMaterial3d(mats.white.clone()), pose(Vec3::new(0.0, Y_FILL, 0.0), ga))).id());
+        // far: transit-map marker, white disc with a dark outline (sized per frame)
+        let disc = meshes.add(Cylinder::new(0.5, 0.2));
+        kids.push(commands.spawn((Tier::Far, MarkerRing, Visibility::Hidden, Mesh3d(disc.clone()), MeshMaterial3d(mats.ink.clone()), Transform::from_xyz(0.0, Y_OUTLINE, 0.0))).id());
+        kids.push(commands.spawn((Tier::Far, MarkerFill, Visibility::Hidden, Mesh3d(disc), MeshMaterial3d(mats.white.clone()), Transform::from_xyz(0.0, Y_FILL, 0.0))).id());
         commands.entity(root).add_children(&kids);
         // name label (UI node, positioned each frame)
         commands
@@ -301,10 +357,26 @@ fn rebuild(
     }
 }
 
-fn scale_with_zoom(cam: Option<Res<MapCam>>, mut q: Query<&mut Transform, With<StationRoot>>) {
-    let k = cam.map_or(1.0, |c| (c.view_h / ZOOM_REF).clamp(1.0, 2.4));
-    for mut t in &mut q {
-        t.scale = Vec3::new(k, 1.0, k);
+fn scale_with_zoom(
+    cam: Option<Res<MapCam>>,
+    mut tiers: Query<(&Tier, &mut Visibility)>,
+    mut ring: Query<&mut Transform, (With<MarkerRing>, Without<MarkerFill>)>,
+    mut fill: Query<&mut Transform, (With<MarkerFill>, Without<MarkerRing>)>,
+) {
+    let view = cam.map_or(100.0, |c| c.view_h);
+    let now = tier(view);
+    for (t, mut v) in &mut tiers {
+        let want = if *t == now { Visibility::Inherited } else { Visibility::Hidden };
+        if *v != want {
+            *v = want;
+        }
+    }
+    let d = marker_size(view);
+    for mut t in &mut ring {
+        t.scale = Vec3::new(d, 1.0, d);
+    }
+    for mut t in &mut fill {
+        t.scale = Vec3::new(d * 0.68, 1.0, d * 0.68);
     }
 }
 
@@ -452,5 +524,15 @@ mod tests {
         assert!(rgb(crowding_colour(0.3)).green > rgb(crowding_colour(0.3)).red);
         assert!(rgb(crowding_colour(0.7)).red > 0.9 && rgb(crowding_colour(0.7)).green > 0.6);
         assert!(rgb(crowding_colour(0.95)).red > 0.8 && rgb(crowding_colour(0.95)).green < 0.3);
+    }
+
+    #[test]
+    fn zoom_tiers_switch_at_their_thresholds_and_the_marker_stays_bounded() {
+        assert_eq!(tier(30.0), Tier::Near);
+        assert_eq!(tier(NEAR_VIEW + 1.0), Tier::Mid);
+        assert_eq!(tier(FAR_VIEW + 1.0), Tier::Far);
+        assert_eq!(marker_size(10.0), 3.2);
+        assert_eq!(marker_size(5000.0), 7.0);
+        assert!(marker_size(300.0) > marker_size(150.0));
     }
 }
