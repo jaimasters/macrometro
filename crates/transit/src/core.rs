@@ -48,13 +48,39 @@ pub struct LineId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeKind { Road, Rail }
 
+/// How a rail edge crosses a road (or water). Level crossings stop road traffic while a train passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossingKind { Level, Bridge, Underpass }
+
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crossing {
+    pub kind: CrossingKind,
+    /// Distance along the edge from `a`.
+    pub at: f64,
+    /// Crossed road edge in the city road graph (`u32::MAX` = water).
+    pub road: u32,
+}
+
+/// Track counts: 1 = one-way a->b, 2 = one each way, 4 = two each way (expresses can overtake).
+pub const MAX_TRACKS: u8 = 4;
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Edge {
     pub a: NodeId,
     pub b: NodeId,
     pub len: f64,
     pub kind: EdgeKind,
     pub owner: AgencyId,
+    pub tracks: u8,
+    /// Speed limit on this segment (curves, level crossings); INFINITY = none.
+    pub vcap: f64,
+    pub crossings: Vec<Crossing>,
+}
+
+impl Edge {
+    pub fn new(a: NodeId, b: NodeId, len: f64, kind: EdgeKind, owner: AgencyId) -> Self {
+        Self { a, b, len, kind, owner, tracks: 2, vcap: f64::INFINITY, crossings: vec![] }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +142,14 @@ pub enum TransitAction {
     ExtendLine { line: LineId, from: NodeId, to: NodeId },
     /// One more platform at a station (up to MAX_PLATFORMS).
     AddPlatform(NodeId),
+    /// A rail edge with explicit track count (1 = one-way a->b), speed cap and crossings.
+    AddRail { a: NodeId, b: NodeId, len: f64, tracks: u8, vcap: f64, crossings: Vec<Crossing> },
+    /// Edge index: 1 -> 2 -> 4 tracks.
+    UpgradeTracks(usize),
+    /// Replace a crossing's kind (level -> bridge/underpass).
+    UpgradeCrossing { edge: usize, idx: usize, kind: CrossingKind },
+    /// Rebuild an edge's curve: new length and speed cap.
+    SetCurve { edge: usize, len: f64, vcap: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,9 +166,20 @@ pub enum TransitError {
     /// `ExtendLine` from a stop that is not an end of the line.
     NotTerminus(NodeId),
     MaxPlatforms(NodeId),
+    /// A line may only use a one-way (1-track) segment in its a->b direction, as part of a loop.
+    WrongWay(NodeId, NodeId),
+    /// A non-loop line needs every segment to carry traffic both ways (2+ tracks).
+    OneWayNeedsLoop(usize),
+    MaxTracks(usize),
+    NoEdge(usize),
+    BadTracks,
 }
 
 impl Line {
+    /// A loop line starts and ends at the same stop; trains circulate one way.
+    pub fn looped(&self) -> bool {
+        self.stops.len() >= 3 && self.stops.first() == self.stops.last()
+    }
     /// Mean stop spacing = mean segment length.
     pub fn spacing(&self, net: &Network) -> f64 {
         self.segments.iter().map(|&i| net.edges[i].len).sum::<f64>() / self.segments.len() as f64
@@ -160,6 +205,21 @@ impl Network {
         self.edges.iter().position(|e| e.kind == EdgeKind::Rail && ((e.a, e.b) == (a, b) || (e.a, e.b) == (b, a)))
     }
 
+    /// A hop over a 1-track edge must follow its a->b direction and belong to a loop line.
+    fn check_hop(&self, i: usize, from: NodeId, to: NodeId, looped: bool) -> Result<(), TransitError> {
+        let e = &self.edges[i];
+        if e.tracks > 1 {
+            return Ok(());
+        }
+        if !looped {
+            return Err(TransitError::OneWayNeedsLoop(i));
+        }
+        if (e.a, e.b) != (from, to) {
+            return Err(TransitError::WrongWay(from, to));
+        }
+        Ok(())
+    }
+
     fn check(&self, n: NodeId) -> Result<(), TransitError> {
         if n.0 < self.nodes { Ok(()) } else { Err(TransitError::UnknownNode(n)) }
     }
@@ -176,22 +236,20 @@ impl Network {
                 if !len.is_finite() || *len <= 0.0 {
                     return Err(TransitError::BadLength);
                 }
-                self.edges.push(Edge { a: *a, b: *b, len: *len, kind: *kind, owner: c.agency });
+                self.edges.push(Edge::new(*a, *b, *len, *kind, c.agency));
                 Ok(Applied::Edge(self.edges.len() - 1))
             }
             TransitAction::AddLine { class, stops, alignment_mismatch } => {
                 if stops.len() < 2 {
                     return Err(TransitError::TooFewStops);
                 }
+                let looped = stops.len() >= 3 && stops.first() == stops.last();
                 let mut segments = vec![];
                 for w in stops.windows(2) {
                     self.check(w[0])?;
                     self.check(w[1])?;
-                    let i = self
-                        .edges
-                        .iter()
-                        .position(|e| e.kind == EdgeKind::Rail && ((e.a, e.b) == (w[0], w[1]) || (e.a, e.b) == (w[1], w[0])))
-                        .ok_or(TransitError::NoRailEdge(w[0], w[1]))?;
+                    let i = self.rail_edge(w[0], w[1]).ok_or(TransitError::NoRailEdge(w[0], w[1]))?;
+                    self.check_hop(i, w[0], w[1], looped)?;
                     segments.push(i);
                 }
                 let id = LineId(self.next_line);
@@ -215,7 +273,11 @@ impl Network {
                     return Err(TransitError::NotOwner);
                 }
                 let seg = self.rail_edge(*from, *to).ok_or(TransitError::NoRailEdge(*from, *to))?;
+                self.check_hop(seg, *from, *to, false)?;
                 let l = &mut self.lines[i];
+                if l.looped() {
+                    return Err(TransitError::NotTerminus(*from));
+                }
                 if l.stops.last() == Some(from) {
                     l.stops.push(*to);
                     l.segments.push(seg);
@@ -239,6 +301,41 @@ impl Network {
                 self.platforms[n.0 as usize] = now + 1;
                 Ok(Applied::Removed)
             }
+            TransitAction::AddRail { a, b, len, tracks, vcap, crossings } => {
+                self.check(*a)?;
+                self.check(*b)?;
+                if !len.is_finite() || *len <= 0.0 {
+                    return Err(TransitError::BadLength);
+                }
+                if !matches!(tracks, 1 | 2 | 4) {
+                    return Err(TransitError::BadTracks);
+                }
+                let mut e = Edge::new(*a, *b, *len, EdgeKind::Rail, c.agency);
+                (e.tracks, e.vcap, e.crossings) = (*tracks, *vcap, crossings.clone());
+                self.edges.push(e);
+                Ok(Applied::Edge(self.edges.len() - 1))
+            }
+            TransitAction::UpgradeTracks(i) => {
+                let e = self.edges.get_mut(*i).filter(|e| e.kind == EdgeKind::Rail).ok_or(TransitError::NoEdge(*i))?;
+                if e.tracks >= MAX_TRACKS {
+                    return Err(TransitError::MaxTracks(*i));
+                }
+                e.tracks *= 2;
+                Ok(Applied::Edge(*i))
+            }
+            TransitAction::UpgradeCrossing { edge, idx, kind } => {
+                let cr = self.edges.get_mut(*edge).and_then(|e| e.crossings.get_mut(*idx)).ok_or(TransitError::NoEdge(*edge))?;
+                cr.kind = *kind;
+                Ok(Applied::Edge(*edge))
+            }
+            TransitAction::SetCurve { edge, len, vcap } => {
+                if !len.is_finite() || *len <= 0.0 {
+                    return Err(TransitError::BadLength);
+                }
+                let e = self.edges.get_mut(*edge).filter(|e| e.kind == EdgeKind::Rail).ok_or(TransitError::NoEdge(*edge))?;
+                (e.len, e.vcap) = (*len, *vcap);
+                Ok(Applied::Edge(*edge))
+            }
             TransitAction::RemoveNode(n) => {
                 self.check(*n)?;
                 let touching = |e: &Edge| e.a == *n || e.b == *n;
@@ -250,8 +347,11 @@ impl Network {
                 for l in self.lines.iter().filter(|l| l.owner == c.agency) {
                     if let Some(i) = l.stops.iter().position(|s| s == n).filter(|i| *i > 0 && *i + 1 < l.stops.len()) {
                         let (p, q) = (l.stops[i - 1], l.stops[i + 1]);
-                        let len: f64 = l.segments[i - 1..=i].iter().map(|&s| self.edges[s].len).sum();
-                        bridges.push(Edge { a: p, b: q, len, kind: EdgeKind::Rail, owner: c.agency });
+                        let (e1, e2) = (&self.edges[l.segments[i - 1]], &self.edges[l.segments[i]]);
+                        let mut br = Edge::new(p, q, e1.len + e2.len, EdgeKind::Rail, c.agency);
+                        br.tracks = e1.tracks.min(e2.tracks);
+                        br.vcap = e1.vcap.min(e2.vcap);
+                        bridges.push(br);
                     }
                 }
                 self.edges.extend(bridges);

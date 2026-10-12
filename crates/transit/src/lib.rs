@@ -3,6 +3,7 @@
 use bevy::prelude::*;
 
 mod core;
+pub mod trains;
 pub use core::*;
 
 #[derive(Resource, Default)]
