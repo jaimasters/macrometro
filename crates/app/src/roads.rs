@@ -193,6 +193,8 @@ struct Journey {
     /// Stable car slot = the CarDot drawing it. Cars are removed from the middle of `cars` on arrival, so the Vec
     /// index is not an identity (indexing dots by it made the remaining cars jump between dots: "random vanishing").
     slot: usize,
+    /// Per route segment: on a roundabout ring (ring traffic has priority over entering cars).
+    ring: Vec<bool>,
 }
 
 #[derive(Resource)]
@@ -232,7 +234,7 @@ impl Journey {
     /// A parked car at the start of its route's lane, facing along it (spawn only; it drives itself from here).
     fn new(trip: Trip, left: bool, slot: usize) -> Self {
         let (pos, d) = (lane_pt(&trip, 0, 0.0, left), seg_dir(&trip, 0));
-        Journey { pos, head: d.y.atan2(d.x), steer: 0.0, left, trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot }
+        Journey { pos, head: d.y.atan2(d.x), steer: 0.0, left, trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot, ring: vec![] }
     }
     fn dir(&self) -> Vec2 {
         Vec2::from_angle(self.head)
@@ -361,13 +363,27 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
         }
     }
     let junc = |p: Vec2| nb.get(&pkey(p)).is_some_and(|v| v.len() >= 3);
+    let on_ring = |c: &Journey, s: usize| c.ring.get(s).copied().unwrap_or(false);
+    // give way: a car about to enter a ring waits while a ring car is approaching its entry point (on the ring, the
+    // point is among its next two, within YIELD). ponytail: Euclidean distance, path distance if rings get large.
+    const YIELD: f32 = 7.0;
+    let yields: Vec<bool> = (0..cars.len()).map(|i| {
+        let c = &cars[i];
+        c.seg + 2 < c.trip.pts.len() && !on_ring(c, c.seg) && on_ring(c, c.seg + 1) && {
+            let p = c.trip.pts[c.seg + 1];
+            cars.iter().enumerate().any(|(k, o)| {
+                k != i && on_ring(o, o.seg) && o.pos.distance(p) < YIELD && o.trip.pts[o.seg + 1..(o.seg + 3).min(o.trip.pts.len())].contains(&p)
+            })
+        }
+    }).collect();
+    let must_yield = |i: usize| yields[i];
     for (i, c) in cars.iter().enumerate() {
         if c.seg > 0 && c.along < JUNC && junc(c.trip.pts[c.seg]) && !thru(c, c.seg - 1) {
             held.entry(pkey(c.trip.pts[c.seg])).or_insert(i);
         }
     }
     for (i, c) in cars.iter().enumerate() {
-        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC && junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) {
+        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC && junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && !must_yield(i) {
             held.entry(pkey(c.trip.pts[c.seg + 1])).or_insert(i);
         }
     }
@@ -387,7 +403,7 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
                 let (exit, dn) = (lane_pt(&c.trip, c.seg + 1, 0.0, c.left), seg_dir(&c.trip, c.seg + 1));
                 let blocked = cars.iter().enumerate().any(|(k, o)| k != i && o.pos.distance(exit) < CAR_LEN + CAR_GAP && (o.pos - exit).dot(dn) > -0.5 && o.dir().dot(dn) > 0.7);
                 let room = !blocked || !junc(c.trip.pts[c.seg + 1]);
-                if junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && (held.get(&node).is_some_and(|&h| h != i) || !room) && boss != Some(i) {
+                if junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && (held.get(&node).is_some_and(|&h| h != i) || !room || must_yield(i)) && boss != Some(i) {
                     gap = gap.min(len - JUNC - c.along + CAR_GAP);
                 } else if !thru(c, c.seg) && len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
                     held.insert(node, i);
@@ -415,9 +431,10 @@ type Rings = std::collections::HashMap<(u32, u32), city::junctions::Ring>;
 
 /// Route a trip around every roundabout it passes: the junction point becomes the ring arc (entry leg to exit leg)
 /// in the driving-side direction, at a reduced speed.
-fn ring_trip(t: &mut Trip, rings: &Rings, left: bool) {
+/// Returns the per-segment on-ring flags for `Journey::ring`.
+fn ring_trip(t: &mut Trip, rings: &Rings, left: bool) -> Vec<bool> {
     let n = t.pts.len();
-    let (mut pts, mut se, mut ss) = (vec![t.pts[0]], vec![], vec![]);
+    let (mut pts, mut se, mut ss, mut on) = (vec![t.pts[0]], vec![], vec![], vec![]);
     for k in 1..n {
         match rings.get(&pkey(t.pts[k])).filter(|_| k + 1 < n) {
             Some(r) => {
@@ -425,16 +442,19 @@ fn ring_trip(t: &mut Trip, rings: &Rings, left: bool) {
                     pts.push(p);
                     se.push(if i == 0 { t.seg_edge[k - 1] } else { t.seg_edge[k] });
                     ss.push(if i == 0 { t.seg_speed[k - 1] } else { t.seg_speed[k] * 0.6 });
+                    on.push(i > 0);
                 }
             }
             None => {
                 pts.push(t.pts[k]);
                 se.push(t.seg_edge[k - 1]);
                 ss.push(t.seg_speed[k - 1]);
+                on.push(false);
             }
         }
     }
     (t.pts, t.seg_edge, t.seg_speed) = (pts, se, ss);
+    on
 }
 
 /// Drive on the left instead of the right (R34). Saved with the game.
@@ -676,9 +696,9 @@ fn drive_cars(
             // a new car waits at its origin until the lane's entrance is clear
             if !j.cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts.first() == trip.pts.first()) {
                 let mut trip = trip;
-                ring_trip(&mut trip, &j.rings, hand.0);
+                let ring = ring_trip(&mut trip, &j.rings, hand.0);
                 let slot = (0..MAX_CARS).find(|k| !j.cars.iter().any(|c| c.slot == *k)).unwrap_or(0);
-                j.cars.push(Journey::new(trip, hand.0, slot));
+                j.cars.push(Journey { ring, ..Journey::new(trip, hand.0, slot) });
             }
         }
     }
@@ -747,9 +767,13 @@ mod tests {
     /// Drive one car alone to its destination: heading changes continuously with a bounded yaw rate, every step is
     /// at most v*dt (no teleport), it stays near its lane, and it is removed only on arrival.
     fn drive_alone(trip: Trip) -> f32 {
+        drive_car(Journey::new(trip, false, 0), |_| {})
+    }
+    /// `drive_alone` for a given car; `look` sees it after every step.
+    fn drive_car(j: Journey, mut look: impl FnMut(&Journey)) -> f32 {
         let dt = 0.05;
-        let end = *trip.pts.last().unwrap();
-        let mut cars = vec![Journey::new(trip, false, 0)];
+        let end = *j.trip.pts.last().unwrap();
+        let mut cars = vec![j];
         let mut turned = 0.0;
         for _ in 0..4000 {
             let (p, h, v0) = (cars[0].pos, cars[0].head, cars[0].v);
@@ -758,7 +782,8 @@ mod tests {
             let dh = (c.head - h + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             assert!(dh.abs() <= MAX_YAW * dt + 1e-4, "yaw rate {} rad/s", dh / dt);
             assert!(c.pos.distance(p) <= v0.max(c.v) * dt + 1e-4, "teleport {} in one step", c.pos.distance(p));
-            let err = c.pos.distance(lane_pt(&c.trip, c.seg, c.along, false));
+            look(c);
+            let err = c.pos.distance(lane_pt(&c.trip, c.seg, c.along, c.left));
             assert!(err < 1.5, "left its lane by {err}");
             turned += dh;
         }
@@ -896,9 +921,9 @@ mod tests {
                     let out = dirs[(k + 1 + step / 4 % 3) % 4];
                     let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
                     let mut trip = trip;
-                    ring_trip(&mut trip, &rings, true);
+                    let ring = ring_trip(&mut trip, &rings, true);
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey::new(trip, false, 0));
+                        cars.push(Journey { ring, ..Journey::new(trip, true, 0) });
                     }
                 }
             }
@@ -924,6 +949,58 @@ mod tests {
                 done = 0;
             }
         }
+    }
+
+    /// Queue 1 (left-hand regression, seen on 1d9be02): with left-hand driving, as seen ON SCREEN (world y points down
+    /// the screen), the ring runs clockwise, cars keep left of the centreline on the way in and out (and on plain
+    /// roads), and an entering car gives way to a ring car approaching its entry point.
+    #[test]
+    fn left_hand_roundabouts_run_clockwise_keep_left_and_give_way() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let scr = |p: Vec2| Vec2::new(p.x, -p.y);
+        let mut rings = Rings::new();
+        rings.insert(pkey(Vec2::ZERO), city::junctions::Ring { c: Vec2::ZERO, r: 3.0, legs: vec![-FRAC_PI_2, 0.0, FRAC_PI_2, PI] });
+        let trip = |a: Vec2, b: Vec2| Trip { from: 0, to: 1, pts: vec![a * 18.0, a * 12.0, Vec2::ZERO, b * 12.0, b * 18.0], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
+        let car = |mut t: Trip| {
+            let ring = ring_trip(&mut t, &rings, true);
+            Journey { ring, ..Journey::new(t, true, 0) }
+        };
+        // clockwise on screen: negative signed turn in screen (y-up) coordinates
+        let j = car(trip(Vec2::X, -Vec2::X));
+        let ring: Vec<Vec2> = (0..j.trip.pts.len()).filter(|&k| k > 0 && j.ring[k - 1]).map(|k| scr(j.trip.pts[k])).collect();
+        assert!(ring.windows(2).map(|w| w[0].perp_dot(w[1])).sum::<f32>() < 0.0, "ring runs anticlockwise on screen");
+        // keep left on the approach, the exit and a plain straight road (screen-left of travel = positive cross)
+        let straight = Trip { from: 0, to: 1, pts: vec![Vec2::ZERO, Vec2::X * 20.0], seg_edge: vec![0], seg_speed: vec![4.0], nodes: vec![], edges: vec![] };
+        let plain = Trip { from: 0, to: 1, pts: vec![Vec2::X * 18.0, Vec2::X * 12.0, Vec2::ZERO, Vec2::Y * 12.0], seg_edge: vec![0, 1, 2], seg_speed: vec![4.0; 3], nodes: vec![], edges: vec![] };
+        for (j, name) in [(car(trip(Vec2::X, Vec2::Y)), "ring"), (Journey::new(plain, true, 0), "plain junction"), (Journey::new(straight, true, 0), "straight")] {
+            let n = j.trip.pts.len();
+            drive_car(j, |c| {
+                if (c.seg == 0 || c.seg + 2 == n) && c.along > 4.0 && !c.ring.get(c.seg).copied().unwrap_or(false) {
+                    let (a, b) = (scr(c.trip.pts[c.seg]), scr(c.trip.pts[c.seg + 1]));
+                    assert!((b - a).perp_dot(scr(c.pos) - a) > 0.2, "{name}: right of the centreline on segment {}", c.seg);
+                }
+            });
+        }
+        // give way: car A is about to enter from +X; car B is already on the ring heading for that entry point
+        let mut a = car(trip(Vec2::X, -Vec2::X));
+        let entry = a.trip.pts[2];
+        (a.pos, a.v) = (lane_pt(&a.trip, 1, 12.0 - 3.0 - JUNC - 0.3, true), 2.0);
+        a.track();
+        let mut b = car(trip(-Vec2::Y, Vec2::Y));
+        let k = b.trip.pts.iter().position(|&p| p == entry).expect("ring car passes A's entry");
+        (b.pos, b.head, b.v) = (lane_pt(&b.trip, k - 1, 0.5, true), seg_dir(&b.trip, k - 1).to_angle(), 2.0);
+        b.track();
+        assert!(b.ring[b.seg], "B starts on the ring");
+        let mut cars = vec![a, b];
+        for _ in 0..400 {
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
+            let b_past = cars.len() < 2 || cars[1].seg >= k;
+            if b_past {
+                return;
+            }
+            assert!(cars[0].seg < 2, "A entered the ring ahead of the approaching ring car");
+        }
+        panic!("ring car never passed the entry");
     }
 
     #[test]

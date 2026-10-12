@@ -123,8 +123,8 @@ impl Ring {
         v
     }
 
-    /// Ring points a car drives from the leg toward `from` to the leg toward `to`, circulating anticlockwise for
-    /// right-hand traffic and clockwise for left-hand. Shared vertices let cars on the ring and entering cars meet.
+    /// Ring points a car drives from the leg toward `from` to the leg toward `to`, circulating (on screen) anticlockwise for
+    /// right-hand traffic and clockwise for left-hand; see `ring_dir`. Shared vertices let cars on the ring and entering cars meet.
     pub fn path(&self, from: Vec2, to: Vec2, left_hand: bool) -> Vec<Vec2> {
         let v = self.verts();
         let near = |p: Vec2| {
@@ -151,9 +151,11 @@ fn ang(d: f32) -> f32 {
     t.min(std::f32::consts::TAU - t)
 }
 
-/// Ring circulation sign: +1 anticlockwise (right-hand traffic), -1 clockwise (left-hand).
+/// Ring circulation sign in world (x, y) maths terms: +1 anticlockwise, -1 clockwise. The camera looks down with
+/// world +y toward the bottom of the screen, so the view is mirrored: maths-anticlockwise reads clockwise on screen.
+/// Left-hand traffic circulates clockwise ON SCREEN (+1 here); right-hand anticlockwise on screen (-1).
 pub fn ring_dir(left_hand: bool) -> f32 {
-    if left_hand { -1.0 } else { 1.0 }
+    if left_hand { 1.0 } else { -1.0 }
 }
 
 #[cfg(test)]
@@ -198,7 +200,8 @@ mod tests {
         assert_eq!(ring_dir(false), -ring_dir(true));
     }
 
-    /// R31: a car crossing a four-leg roundabout goes round it anticlockwise (right-hand), clockwise (left-hand).
+    /// R31: a car crossing a four-leg roundabout goes round it anticlockwise (right-hand), clockwise (left-hand), as seen on
+    /// screen (world maths sense is mirrored, see `ring_dir`).
     #[test]
     fn ring_path_circulates_with_the_driving_side() {
         let ring = Ring { c: Vec2::ZERO, r: 3.0, legs: vec![-1.5707964, 0.0, 1.5707964, 3.1415927] };
@@ -206,7 +209,7 @@ mod tests {
             let p = ring.path(Vec2::new(12.0, 0.0), Vec2::new(-12.0, 0.0), left);
             assert_eq!(p.len(), 5, "half way round via the midpoints and the side leg");
             let turn: f32 = p.windows(2).map(|w| w[0].perp_dot(w[1])).sum();
-            assert!(if left { turn < 0.0 } else { turn > 0.0 }, "left={left}: wrong way round");
+            assert!(if left { turn > 0.0 } else { turn < 0.0 }, "left={left}: wrong way round");
             assert!(p.iter().all(|q| (q.length() - 3.0).abs() < 1e-4));
         }
     }
