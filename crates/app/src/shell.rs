@@ -629,4 +629,26 @@ mod tests {
         let (v, _) = to_transit(&cmd(1, ToolAction::AddPlatform { cell }), &mut m, &centres);
         assert_eq!(v[0].action, TransitAction::AddPlatform(NodeId(1)));
     }
+
+    #[test]
+    fn crossing_upgrade_is_priced_per_level_crossing_and_only_once() {
+        let centres = [Vec2::ZERO];
+        let mut m = StationMap::new(1);
+        let (a, b) = (IVec2::new(0, 12), IVec2::new(40, 12));
+        let mut net = transit::Network::default();
+        net.apply(&TransitCommand { agency: AgencyId(0), action: TransitAction::AddNode }).unwrap();
+        let mut hops = Hops::new();
+        let level = Crossing { kind: CrossingKind::Level, at: 10.0, road: 3 };
+        hops.insert(hop_key(a, b), Some(HopPlan { from: a, len: 40.0, vcap: 6.0, crossings: vec![level, Crossing { at: 20.0, road: 4, ..level }] }));
+        for t in to_transit_with(&cmd(1, ToolAction::DrawLine { cells: vec![a, b] }), &mut m, &centres, &hops).0 {
+            net.apply(&t).unwrap();
+        }
+        let (edge, ups, cost) = crossing_upgrades(&net, &m, a, b, false).unwrap();
+        assert_eq!(ups.len(), 2);
+        assert_eq!(cost, 2.0 * crossing_upgrade_cost(CrossingKind::Level, CrossingKind::Bridge).unwrap());
+        for (idx, kind) in ups {
+            net.apply(&TransitCommand { agency: AgencyId(1), action: TransitAction::UpgradeCrossing { edge, idx, kind } }).unwrap();
+        }
+        assert!(crossing_upgrades(&net, &m, a, b, true).is_none(), "nothing left to separate");
+    }
 }
