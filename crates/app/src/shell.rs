@@ -2,7 +2,7 @@
 //! white stations with dark outlines, thick coloured octilinear lines, capsule trains.
 use crate::camera::MapCam;
 use crate::zones::{CityPlan, GrowthLink, ZoneLayout};
-use city::placer::{merge_crossings, road_crossings, LEVEL_VCAP, crossing_upgrade_cost, place_track, Ctx, Placement, DEFAULT_RADIUS, RADII, RAIL_COST_PER_LEN};
+use city::placer::{place_departing, merge_crossings, road_crossings, LEVEL_VCAP, crossing_upgrade_cost, place_track, Ctx, Placement, DEFAULT_RADIUS, RADII, RAIL_COST_PER_LEN};
 use bevy::prelude::*;
 use economy::{Category, CurrentBudget, Economy, SpendCommand, SpendQueue};
 use sim_core::AgencyId;
@@ -533,7 +533,16 @@ fn apply_tool_commands(
                     continue;
                 }
                 let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &gone, land: &land };
-                let Some(p) = place_track(&ctx, c0.as_vec2(), c1.as_vec2(), steer_point(c0, c1), DEFAULT_RADIUS) else {
+                // extending past a station: leave it collinear with the hop that arrives there
+                let axis = lines.all.iter().find_map(|l| {
+                    let i = l.cells.iter().position(|c| *c == c0)?;
+                    let prev = if i + 1 == l.cells.len() { *l.cells.get(i.checked_sub(1)?)? } else if i == 0 { *l.cells.get(1)? } else { return None };
+                    let g = geoms.0.get(&hop_key(prev, c0)).filter(|g| g.len() >= 2).cloned().unwrap_or_else(|| vec![prev.as_vec2(), c0.as_vec2()]);
+                    let (q, r) = if hop_key(prev, c0).1 == c0 { (g[g.len() - 2], g[g.len() - 1]) } else { (g[1], g[0]) };
+                    Some(r - q)
+                });
+                let placed = axis.and_then(|ax| place_departing(&ctx, c0.as_vec2(), c1.as_vec2(), ax, DEFAULT_RADIUS)).or_else(|| place_track(&ctx, c0.as_vec2(), c1.as_vec2(), steer_point(c0, c1), DEFAULT_RADIUS));
+                let Some(p) = placed else {
                     refused = true;
                     break;
                 };
