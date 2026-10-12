@@ -22,5 +22,19 @@ fn main() {
             EntityCountDiagnosticsPlugin::default(),
             LogDiagnosticsPlugin { wait_duration: Duration::from_secs(5), ..default() },
         ))
+        .add_systems(Last, worst_frame)
         .run();
+}
+
+/// Averages hide hitches: log the worst frame and the count of frames over 20 ms every 5 s.
+fn worst_frame(time: Res<Time<Real>>, mut st: Local<(f32, u32, u32, f32)>) {
+    let ms = time.delta_secs() * 1000.0;
+    st.0 = st.0.max(ms);
+    st.1 += (ms > 20.0) as u32;
+    st.2 += 1;
+    st.3 += time.delta_secs();
+    if st.3 >= 5.0 {
+        info!("worst_frame {:.1} ms, {} of {} frames over 20 ms", st.0, st.1, st.2);
+        *st = (0.0, 0, 0, 0.0);
+    }
 }
