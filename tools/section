@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# section FILE "Heading"            -> print body of "## Heading" (until next "## ")
+# section FILE "Heading" --replace  -> replace that body with stdin
+set -euo pipefail
+f=$1; h=$2; mode=${3:-}
+if [ "$mode" = --replace ]; then
+  new=$(mktemp); cat > "$new"
+  awk -v h="## $h" -v nf="$new" '
+    $0==h || index($0,h" ")==1 {print; while((getline l < nf)>0) print l; skip=1; next}
+    skip && /^## / {skip=0}
+    !skip {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"; rm -f "$new"
+else
+  awk -v h="## $h" '$0==h || index($0,h" ")==1 {on=1; next} on && /^## / {exit} on' "$f"
+fi
