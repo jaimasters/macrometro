@@ -36,7 +36,18 @@ pub struct Router {
     access_node: Vec<u32>,
     access_edge: Vec<usize>,
     centre: Vec<Vec2>,
+    /// Driveway end on the road per zone (trips start and end here, not at the building).
+    foot: Vec<Vec2>,
     commercial: Vec<bool>,
+}
+
+/// R36: nearest point on zone `z`'s frontage road to its building: where the driveway meets the street.
+pub fn driveway_foot(plan: &TownPlan, z: usize) -> Vec2 {
+    let c = plan.parcels[z].center;
+    let (a, b) = plan.graph.pos(plan.parcels[z].access);
+    let ab = b - a;
+    let t = if ab.length_squared() < 1e-9 { 0.0 } else { ((c - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) };
+    a + ab * t
 }
 
 impl Router {
@@ -58,6 +69,7 @@ impl Router {
             access_node: (0..plan.parcels.len()).map(|z| plan.access_node(z)).collect(),
             access_edge: plan.parcels.iter().map(|p| p.access).collect(),
             centre: plan.parcels.iter().map(|p| p.center).collect(),
+            foot: (0..plan.parcels.len()).map(|z| driveway_foot(plan, z)).collect(),
             commercial: plan.parcels.iter().map(|p| p.kind == ZoneKind::Commercial).collect(),
         }
     }
@@ -142,14 +154,14 @@ impl Router {
         }
         nodes.reverse();
         edges.reverse();
-        let mut pts = vec![self.centre[from]];
+        let mut pts = vec![self.foot[from]];
         let (mut seg_edge, mut seg_speed) = (vec![self.access_edge[from]], vec![SPEED_LOCAL as f32]);
         pts.extend(nodes.iter().map(|&n| self.node_pos[n as usize]));
         for &e in &edges {
             seg_edge.push(e);
             seg_speed.push(self.speed[e]);
         }
-        pts.push(self.centre[to]);
+        pts.push(self.foot[to]);
         seg_edge.push(self.access_edge[to]);
         seg_speed.push(SPEED_LOCAL as f32);
         Some(Trip { from, to, pts, seg_edge, seg_speed, nodes, edges })
@@ -181,8 +193,10 @@ mod tests {
             let Some(t) = r.route(&built, &[], a, b) else { continue };
             routed += 1;
             assert_eq!((t.from, t.to), (a, b));
-            assert_eq!(t.pts[0], plan.parcels[a].center);
-            assert_eq!(*t.pts.last().unwrap(), plan.parcels[b].center);
+            assert_eq!(t.pts[0], driveway_foot(&plan, a));
+            assert_eq!(*t.pts.last().unwrap(), driveway_foot(&plan, b));
+            let (p, q) = plan.graph.pos(plan.parcels[a].access);
+            assert!((t.pts[0] - p).length() + (t.pts[0] - q).length() - (p - q).length() < 1e-2, "driveway ends on its road");
             assert_eq!(t.nodes[0], plan.access_node(a));
             assert_eq!(*t.nodes.last().unwrap(), plan.access_node(b));
             // every driven edge is built and joins consecutive nodes

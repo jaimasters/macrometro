@@ -38,6 +38,10 @@ struct RoadEdge(usize);
 #[derive(Component)]
 struct RoadCasing(usize);
 
+/// A building's driveway; shown once its frontage road (the edge index) is built.
+#[derive(Component)]
+struct Driveway(usize);
+
 /// Lane marking on road `edge`: `k` = 0 centreline, else a lane divider `k` lanes out to each side (`side` +-1).
 #[derive(Component)]
 struct RoadMark {
@@ -243,6 +247,14 @@ fn spawn_roads(
     for i in 0..MAX_CARS {
         commands.spawn((CarDot(i), Mesh3d(car_mesh.clone()), MeshMaterial3d(car.clone()), Transform::from_xyz(0.0, Y_CAR, 0.0), Visibility::Hidden));
     }
+    // driveways: a short stub from every building to its road
+    let drive = flat(Color::srgb(0.62, 0.60, 0.56));
+    for (z, pc) in cp.plan.parcels.iter().enumerate() {
+        let foot = city::driveway_foot(&cp.plan, z);
+        if foot.distance(pc.center) > 0.3 {
+            commands.spawn((Driveway(pc.access), Mesh3d(rect.clone()), MeshMaterial3d(drive.clone()), segment_transform(pc.center, foot, Y_ROAD - 0.02, 0.5, 0.1), Visibility::Hidden));
+        }
+    }
     let mark_mat = flat(Color::srgb(0.97, 0.97, 0.9));
     commands.insert_resource(MarkAssets(rect.clone(), mark_mat.clone()));
     for (i, _) in cp.plan.graph.edges.iter().enumerate() {
@@ -319,6 +331,7 @@ fn update_roads(
     mut last: Local<(Option<u64>, bool)>,
     mut roads: Query<(&RoadEdge, &mut RoadLook, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>)>,
     mut casings: Query<(&RoadCasing, &mut Visibility), Without<RoadEdge>>,
+    mut drives: Query<(&Driveway, &mut Visibility), (Without<RoadEdge>, Without<RoadCasing>)>,
 ) {
     let s = link.snapshots.latest();
     let zoomed_out = cam.as_ref().map_or(true, |c| c.view_h > TINT_VIEW);
@@ -341,6 +354,12 @@ fn update_roads(
             } else {
                 mats.tint[want as usize].clone()
             };
+        }
+    }
+    for (d, mut v) in &mut drives {
+        let want = vis(s.built.get(d.0).copied().unwrap_or(false));
+        if *v != want {
+            *v = want;
         }
     }
     for (c, mut v) in &mut casings {
