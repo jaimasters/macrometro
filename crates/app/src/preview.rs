@@ -23,11 +23,24 @@ pub fn summary(p: &Placement) -> String {
     )
 }
 
+/// True while the placer preview is on screen (the old straight preview is hidden then).
+#[derive(Resource, Default)]
+struct PlacerShown(bool);
+
+fn hide_old(shown: Res<PlacerShown>, mut q: Query<&mut Visibility, With<ui_tools::DragPreview>>) {
+    for mut v in &mut q {
+        let want = if shown.0 { Visibility::Hidden } else { Visibility::Inherited };
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
 pub struct PreviewPlugin;
 
 impl Plugin for PreviewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_text).add_systems(Update, update_preview);
+        app.init_resource::<PlacerShown>().add_systems(Startup, spawn_text).add_systems(Update, (update_preview, hide_old).chain());
     }
 }
 
@@ -58,12 +71,14 @@ fn update_preview(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    mut shown: ResMut<PlacerShown>,
     mut last: Local<Option<LineDrag>>,
 ) {
     if !drag.is_changed() || last.as_ref() == Some(&*drag) {
         return;
     }
     *last = Some(drag.clone());
+    shown.0 = false;
     for e in &old {
         commands.entity(e).despawn();
     }
@@ -118,6 +133,7 @@ fn update_preview(
         let side = Vec2::new(-dir.y, dir.x);
         commands.spawn((PlacementMark, Mesh3d(cube.clone()), MeshMaterial3d(m), segment_transform(pos - side * 3.0, pos + side * 3.0, Y_PREVIEW + 0.3, 1.0, 0.4)));
     }
+    shown.0 = true;
     for (mut t, mut v) in &mut text {
         t.0 = summary(&p);
         *v = Visibility::Inherited;
