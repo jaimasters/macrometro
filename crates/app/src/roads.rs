@@ -49,13 +49,15 @@ pub fn tint_bucket(vc: f32) -> u8 {
     ((vc.clamp(0.0, 1.6) / 1.6) * (TINT_BUCKETS - 1) as f32).round() as u8
 }
 
-/// Green (free) -> yellow -> red (jammed).
+/// Neutral road colour while free-flowing; amber -> red only above ~0.6 v/c. No green: it means residential.
 pub fn tint_colour(bucket: usize) -> Color {
-    let t = bucket as f32 / (TINT_BUCKETS - 1) as f32;
-    let (g, y, r) = ((0.22, 0.72, 0.36), (0.96, 0.82, 0.20), (0.86, 0.18, 0.18));
-    let mix = |a: (f32, f32, f32), b: (f32, f32, f32), k: f32| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k);
-    let (r_, g_, b_) = if t < 0.5 { mix(g, y, t * 2.0) } else { mix(y, r, (t - 0.5) * 2.0) };
-    Color::srgb(r_, g_, b_)
+    let vc = bucket as f32 / (TINT_BUCKETS - 1) as f32 * 1.6;
+    if vc < 0.6 {
+        return Color::srgb(0.70, 0.68, 0.62);
+    }
+    let k = ((vc - 0.6) / 0.6).min(1.0);
+    let (a, r) = ((0.96, 0.66, 0.18), (0.86, 0.18, 0.18));
+    Color::srgb(a.0 + (r.0 - a.0) * k, a.1 + (r.1 - a.1) * k, a.2 + (r.2 - a.2) * k)
 }
 
 fn h01(e: usize, k: u32) -> f32 {
@@ -237,12 +239,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tint_runs_green_to_red_and_clamps() {
+    fn tint_is_neutral_when_free_then_amber_to_red_never_green() {
         assert_eq!(tint_bucket(0.0), 0);
         assert_eq!(tint_bucket(5.0), (TINT_BUCKETS - 1) as u8);
         assert!((0..TINT_BUCKETS - 1).all(|k| tint_bucket(k as f32 * 0.2) <= tint_bucket((k + 1) as f32 * 0.2)));
-        let (g, r) = (tint_colour(0).to_srgba(), tint_colour(TINT_BUCKETS - 1).to_srgba());
-        assert!(g.green > g.red && r.red > r.green);
+        let (free, jam) = (tint_colour(0).to_srgba(), tint_colour(TINT_BUCKETS - 1).to_srgba());
+        assert_eq!(tint_colour(tint_bucket(0.5) as usize), tint_colour(0), "free flow stays neutral");
+        assert!(jam.red > 0.8 && jam.green < 0.3 && free.red < 0.75);
+        assert!((0..TINT_BUCKETS).all(|k| { let c = tint_colour(k).to_srgba(); c.green <= c.red }), "no green tint");
     }
 
     #[test]

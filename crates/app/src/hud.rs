@@ -159,6 +159,12 @@ fn legend(commands: &mut Commands) {
                     e.spawn(text(k.name(), 13.0));
                 });
             }
+            p.spawn(Node { column_gap: Val::Px(5.0), align_items: AlignItems::Center, ..default() }).with_children(|e| {
+                for c in [crate::roads::tint_colour(4), crate::roads::tint_colour(7)] {
+                    e.spawn((Node { width: Val::Px(12.0), height: Val::Px(4.0), ..default() }, BackgroundColor(c)));
+                }
+                e.spawn(text("Congestion", 13.0));
+            });
         });
 }
 
