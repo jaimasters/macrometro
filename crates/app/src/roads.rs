@@ -134,54 +134,75 @@ fn advance(j: &mut Journey, dt: f32, slow: impl Fn(usize) -> f32) -> bool {
     move_by(j, v * dt)
 }
 
-/// Road segment a car is on, with its direction: cars share a lane only when this matches.
-fn lane_key(j: &Journey) -> Option<(usize, bool)> {
-    let (a, b) = (*j.trip.pts.get(j.seg)?, *j.trip.pts.get(j.seg + 1)?);
-    let e = *j.trip.seg_edge.get(j.seg)?;
-    Some((e, (b.x, b.y) > (a.x, a.y)))
+type Key = (u32, u32, u32, u32);
+fn pkey(p: Vec2) -> (u32, u32) {
+    (p.x.to_bits(), p.y.to_bits())
+}
+/// Directed road segment `k` of a route: cars share a lane only when both endpoints match (so `along` is comparable).
+fn seg_key(t: &Trip, k: usize) -> Option<Key> {
+    let (a, b) = (pkey(*t.pts.get(k)?), pkey(*t.pts.get(k + 1)?));
+    Some((a.0, a.1, b.0, b.1))
+}
+fn lane_key(j: &Journey) -> Option<Key> {
+    seg_key(&j.trip, j.seg)
 }
 
 fn seg_len(j: &Journey) -> f32 {
     j.trip.pts[j.seg].distance(j.trip.pts[j.seg + 1])
 }
 
+/// Junction zone: a car this close to a node (either side) holds it; others wait at the stop line before it.
+const JUNC: f32 = 1.6;
+
 /// One car-following step for every car (in index order, deterministic): accelerate toward the congestion-limited
-/// speed, but never faster than lets the car stop behind the one ahead in its lane.
+/// speed, but never faster than lets the car stop behind the one ahead in its lane, or at the stop line of a junction
+/// another car holds. A car just past a node (on the ring) holds it first, so entering cars give way.
 fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32) {
-    let mut lanes: std::collections::HashMap<(usize, bool), Vec<f32>> = std::collections::HashMap::new();
-    for c in cars.iter() {
+    use std::collections::HashMap;
+    let mut lanes: HashMap<Key, Vec<f32>> = HashMap::new();
+    let mut held: HashMap<(u32, u32), usize> = HashMap::new();
+    for (i, c) in cars.iter().enumerate() {
         if let Some(k) = lane_key(c) {
             lanes.entry(k).or_default().push(c.along);
         }
-    }
-    let next_key = |c: &Journey| {
-        let mut n = Journey { trip: Trip { pts: c.trip.pts.clone(), seg_edge: c.trip.seg_edge.clone(), ..c.trip.clone() }, seg: c.seg + 1, along: 0.0, v: 0.0 };
-        if n.seg + 1 >= n.trip.pts.len() {
-            return None;
+        if c.seg > 0 && c.along < JUNC {
+            held.entry(pkey(c.trip.pts[c.seg])).or_insert(i);
         }
-        n.along = 0.0;
-        lane_key(&n)
-    };
+    }
+    for (i, c) in cars.iter().enumerate() {
+        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC {
+            held.entry(pkey(c.trip.pts[c.seg + 1])).or_insert(i);
+        }
+    }
     let mut keep = vec![];
     for i in 0..cars.len() {
         let c = &cars[i];
-        let gap = lane_key(c).and_then(|k| {
+        let len = seg_len(c);
+        let mut gap = f32::INFINITY;
+        if let Some(k) = lane_key(c) {
             let same = lanes.get(&k).into_iter().flatten().copied().filter(|&a| a > c.along + 1e-4).fold(f32::INFINITY, f32::min);
-            if same.is_finite() {
-                return Some(same - c.along - CAR_LEN);
+            gap = gap.min(same - c.along - CAR_LEN);
+            if let Some(nk) = seg_key(&c.trip, c.seg + 1) {
+                let ahead = lanes.get(&nk).into_iter().flatten().copied().fold(f32::INFINITY, f32::min);
+                gap = gap.min(len - c.along + ahead - CAR_LEN);
+                let node = pkey(c.trip.pts[c.seg + 1]);
+                if held.get(&node).is_some_and(|&h| h != i) {
+                    gap = gap.min(len - JUNC - c.along + CAR_GAP);
+                } else if len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
+                    held.insert(node, i);
+                }
             }
-            let nk = next_key(c)?;
-            let ahead = lanes.get(&nk)?.iter().copied().fold(f32::INFINITY, f32::min);
-            ahead.is_finite().then(|| seg_len(c) - c.along + ahead - CAR_LEN)
-        });
-        let vmax = match gap {
-            Some(g) => target_speed(c, &slow).min((2.0 * CAR_BRAKE * (g - CAR_GAP).max(0.0)).sqrt()),
-            None => target_speed(c, &slow),
-        };
+        }
+        let vmax = if gap.is_finite() { target_speed(c, &slow).min((2.0 * CAR_BRAKE * (gap - CAR_GAP).max(0.0)).sqrt()) } else { target_speed(c, &slow) };
         let c = &mut cars[i];
         c.v += (vmax - c.v).clamp(-CAR_BRAKE * dt, CAR_ACCEL * dt);
         c.v = c.v.max(0.0);
-        keep.push(move_by(c, c.v * dt));
+        // never step past the stop distance this tick (the speed cap alone can overshoot by v*dt)
+        let step = if gap.is_finite() { (c.v * dt).min((gap - CAR_GAP * 0.5).max(0.0)) } else { c.v * dt };
+        keep.push(move_by(c, step));
+        if let Some(k) = lane_key(c) {
+            lanes.entry(k).or_default().push(c.along);
+        }
     }
     let mut k = keep.into_iter();
     cars.retain(|_| k.next().unwrap_or(true));
@@ -502,6 +523,42 @@ mod tests {
             cars[1].along = 8.0; // pinned stopped
         }
         assert!(cars[0].along <= 8.0 - CAR_LEN, "stopped behind, got {}", cars[0].along);
+    }
+
+    /// Headless: cars from four arms through one shared junction, plus a straight-through queue, for 60 s. No two cars
+    /// ever overlap (same lane closer than a car length, or bodies closer than 0.6 anywhere), and all of them get through.
+    #[test]
+    fn many_cars_through_a_junction_never_overlap() {
+        let arm = |d: Vec2| d * 12.0;
+        let dirs = [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y];
+        let mut cars: Vec<Journey> = vec![];
+        let mut spawned = 0;
+        for step in 0..1200 {
+            if step % 15 == 0 {
+                for (k, &d) in dirs.iter().enumerate() {
+                    let out = dirs[(k + 1 + step / 15 % 3) % 4];
+                    let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
+                    if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
+                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0 });
+                        spawned += 1;
+                    }
+                }
+            }
+            follow_step(&mut cars, 0.05, |_| 1.0);
+            for left in [false, true] {
+                for i in 0..cars.len() {
+                    for j in i + 1..cars.len() {
+                        let (a, b) = (&cars[i], &cars[j]);
+                        if lane_key(a) == lane_key(b) {
+                            assert!((a.along - b.along).abs() >= CAR_LEN - 1e-3, "same-lane overlap at step {step}");
+                        }
+                        let d = journey_pose(a, left).0.distance(journey_pose(b, left).0);
+                        assert!(d >= 0.6, "cars {i},{j} overlap ({d}) at step {step}");
+                    }
+                }
+            }
+        }
+        assert!(spawned > 40 && cars.len() < 30, "traffic flows: {spawned} spawned, {} still queued", cars.len());
     }
 
     #[test]
