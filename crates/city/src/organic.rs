@@ -38,6 +38,10 @@ const STEP: f32 = 16.0;
 const SETBACK: f32 = 6.0;
 const HOUSE_GAP: f32 = 9.0;
 const CLEAR: f32 = 5.0;
+/// Closest two junctions may sit along a road of this class; arterials space theirs further apart.
+pub fn junction_gap(c: RoadClass) -> f32 {
+    if c == RoadClass::Arterial { STEP * 4.0 } else { STEP * 2.5 }
+}
 
 fn crosses(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     let o = |p: Vec2, q: Vec2, r: Vec2| (q - p).perp_dot(r - p);
@@ -129,6 +133,14 @@ pub fn plan_preset(seed: u64, core: Vec2, preset: Preset) -> TownPlan {
             continue;
         }
         let e = g.g.edges.iter().find(|e| e.a == n || e.b == n).unwrap();
+        // spacing: no new junction within the parent road's junction gap of an existing one
+        let gap = junction_gap(e.class);
+        let crowded = (0..g.g.nodes.len()).any(|m| {
+            m != n as usize && g.g.edges.iter().filter(|e| e.a as usize == m || e.b as usize == m).count() >= 3 && g.g.nodes[m].distance(p) < gap
+        });
+        if crowded {
+            continue;
+        }
         let along = (g.g.nodes[e.b as usize] - g.g.nodes[e.a as usize]).normalize();
         let side = if rng.next_u64() % 2 == 0 { 1.0 } else { -1.0 };
         let len = STEP * (3.0 + (f(&mut rng) as f32) * 5.0);
@@ -210,6 +222,22 @@ mod tests {
                 for z in &plan.parcels {
                     let (a, b) = g.pos(z.access);
                     assert!(seg_dist(z.center, a, b) <= SETBACK + 0.5, "{p:?}: house off its road");
+                }
+                // spacing: junctions keep their class gap and roundabout rings never touch
+                let cls = |e: usize| crate::lanes::default_class(g.edges[e].class);
+                let juncs: Vec<usize> = (0..g.nodes.len()).filter(|&n| inc[n].len() >= 3).collect();
+                let rings: Vec<_> = juncs.iter().filter_map(|&n| crate::junctions::Ring::at(g, &inc[n], n, cls)).collect();
+                for (i, &a) in juncs.iter().enumerate() {
+                    for &b in &juncs[i + 1..] {
+                        let gap = inc[a].iter().map(|&e| junction_gap(g.edges[e].class)).fold(STEP * 2.5, f32::min);
+                        let d = g.nodes[a].distance(g.nodes[b]);
+                        assert!(d >= gap - 0.01, "{p:?} seed {seed}: junctions {a},{b} only {d} apart");
+                    }
+                }
+                for (i, r) in rings.iter().enumerate() {
+                    for q in &rings[i + 1..] {
+                        assert!(r.c.distance(q.c) > r.r + q.r + 2.0, "{p:?} seed {seed}: rings overlap");
+                    }
                 }
                 // junctions only where roads meet: no two edges cross
                 for i in 0..g.edges.len() {
