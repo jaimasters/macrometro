@@ -52,7 +52,7 @@ impl Plugin for HudPlugin {
 }
 
 /// Platform UI font on native (clean sans); wasm falls back to Bevy's built-in font.
-fn ui_font() -> FontSource {
+pub fn ui_font() -> FontSource {
     #[cfg(not(target_arch = "wasm32"))]
     return FontSource::system_ui();
     #[cfg(target_arch = "wasm32")]

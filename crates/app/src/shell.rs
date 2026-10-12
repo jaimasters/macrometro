@@ -18,12 +18,16 @@ const COST_PER_LEN: f64 = 2.0;
 
 // Flat layer stack (world y): land 0 < ghosts 0.5 < zones 1 < lines 2 < preview 2.6 < station outline 3 < station 3.3 < train 4.5.
 const Y_LINE: f32 = 2.0;
-const Y_STATION_OUT: f32 = 3.0;
-const Y_STATION: f32 = 3.3;
 const Y_TRAIN: f32 = 4.5;
 const LINE_WIDTH: f32 = 3.2;
-const LINE_COLOURS: [(f32, f32, f32); 5] =
+pub const LINE_COLOURS: [(f32, f32, f32); 5] =
     [(0.15, 0.45, 0.90), (0.88, 0.25, 0.30), (0.10, 0.62, 0.58), (0.90, 0.72, 0.10), (0.55, 0.35, 0.75)];
+
+/// Colour of line `id` (cycles the palette).
+pub fn line_colour(id: usize) -> Color {
+    let (r, g, b) = LINE_COLOURS[id % LINE_COLOURS.len()];
+    Color::srgb(r, g, b)
+}
 
 /// Grid cell -> transit node for player-placed stations. Zone nodes occupy 0..n, stations follow.
 #[derive(Resource)]
@@ -89,8 +93,6 @@ struct ToolVisuals {
     cylinder: Handle<Mesh>,
     cuboid: Handle<Mesh>,
     capsule: Handle<Mesh>,
-    station_out: Handle<StandardMaterial>,
-    station: Handle<StandardMaterial>,
     train: Handle<StandardMaterial>,
     lines: Vec<Handle<StandardMaterial>>,
 }
@@ -129,9 +131,6 @@ impl Lines {
         changed
     }
 }
-
-#[derive(Component)]
-struct StationVisual(IVec2);
 
 /// Everything drawn for one line (strokes, joints, trains); despawned on change.
 #[derive(Component)]
@@ -187,8 +186,6 @@ fn setup_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut m
         cylinder: meshes.add(Cylinder::new(1.0, 1.0)),
         cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         capsule: meshes.add(Capsule3d::new(2.0, 3.5)),
-        station_out: flat(Color::srgb(0.10, 0.11, 0.14)),
-        station: flat(Color::WHITE),
         train: flat(Color::srgb(0.98, 0.98, 0.98)),
         lines: LINE_COLOURS.iter().map(|&(r, g, b)| flat(Color::srgb(r, g, b))).collect(),
     });
@@ -237,7 +234,6 @@ fn apply_tool_commands(
     vis: Option<Res<ToolVisuals>>,
     mut spend: ResMut<SpendQueue>,
     mut sound: MessageWriter<SoundEvent>,
-    stations: Query<(Entity, &StationVisual)>,
     line_visuals: Query<(Entity, &LineVisual)>,
     mut commands: Commands,
 ) {
@@ -248,11 +244,6 @@ fn apply_tool_commands(
         let (tc, fresh) = to_transit(c, &mut map, &centres);
         transit.0.extend(tc);
         if let ToolAction::DeleteStation { cell } = &c.action {
-            for (e, v) in &stations {
-                if v.0 == *cell {
-                    commands.entity(e).despawn();
-                }
-            }
             let changed = lines.remove_station(*cell);
             for (e, v) in &line_visuals {
                 if changed.contains(&v.0) {
@@ -274,14 +265,6 @@ fn apply_tool_commands(
         }
         for cell in fresh {
             let p = cell.as_vec2();
-            for (mat, r, y) in [(&vis.station_out, 5.4, Y_STATION_OUT), (&vis.station, 3.9, Y_STATION)] {
-                commands.spawn((
-                    StationVisual(cell),
-                    Mesh3d(vis.cylinder.clone()),
-                    MeshMaterial3d(mat.clone()),
-                    Transform::from_xyz(p.x, y, p.y).with_scale(Vec3::new(r, 0.3, r)),
-                ));
-            }
             sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: cell.x / 4 + cell.y / 4, pan: pan(p) });
         }
         if let ToolAction::DrawLine { cells } = &c.action {
