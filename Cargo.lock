@@ -4829,6 +4829,9 @@ name = "save"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "ron",
+ "serde",
+ "world_gen",
 ]
 
 [[package]]
@@ -6456,6 +6459,7 @@ name = "world_gen"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "serde",
 ]
 
 [[package]]

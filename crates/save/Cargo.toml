@@ -6,3 +6,10 @@ description = "Versioned world save format, loader and seeded scenario generator
 
 [dependencies]
 bevy.workspace = true
+world_gen = { path = "../world_gen" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+
+[[bin]]
+name = "gen-scenarios"
+path = "src/bin/gen-scenarios.rs"
