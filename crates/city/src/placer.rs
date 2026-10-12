@@ -329,6 +329,29 @@ pub fn place_track(ctx: &Ctx, a: Vec2, b: Vec2, steer: Option<Vec2>, radius: f32
     best.or_else(|| place_via(ctx, a, b, a + chord * 0.5, radius))
 }
 
+/// Place a track a -> b that leaves `a` exactly along `axis` (the heading of the hop arriving at `a`, so the two hops
+/// at a mid-line station are collinear). None if no legal bend reaches `b` that way.
+pub fn place_departing(ctx: &Ctx, a: Vec2, b: Vec2, axis: Vec2, radius: f32) -> Option<Placement> {
+    let axis = axis.normalize_or_zero();
+    if axis == Vec2::ZERO {
+        return None;
+    }
+    // apex on the axis: far enough for the lead-out and the bend, and level with b when b is ahead
+    let ahead = (b - a).dot(axis);
+    let mut best: Option<Placement> = None;
+    for k in 0..12 {
+        let t = (ahead.max(0.0) + 2.0 * STATION_LEAD + k as f32 * 6.0).max(2.0 * STATION_LEAD);
+        let Some(p) = place_via(ctx, a, b, a + axis * t, radius) else { continue };
+        if (p.pts[1] - a).normalize_or_zero().dot(axis) < 0.999 {
+            continue;
+        }
+        if best.as_ref().map_or(true, |c| p.cost.total < c.cost.total) {
+            best = Some(p);
+        }
+    }
+    best
+}
+
 /// Re-lay an existing placement with a different radius (a later upgrade). The cost to charge is
 /// `new.cost.eminent` (demolishing what the wider arc now sweeps) plus the change in track length.
 pub fn with_radius(ctx: &Ctx, old: &Placement, radius: f32) -> Option<Placement> {
