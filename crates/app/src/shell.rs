@@ -87,12 +87,15 @@ pub fn line_geometry(cells: &[IVec2], geoms: &RailGeoms) -> (Vec<Vec2>, Vec<usiz
     for w in cells.windows(2) {
         let key = hop_key(w[0], w[1]);
         let mut hop = match geoms.0.get(&key) {
-            Some(g) if g.len() >= 2 => g.clone(),
+            Some(g) if g.len() >= 2 => {
+                let mut g = g.clone();
+                if w[0] != key.0 {
+                    g.reverse();
+                }
+                g
+            }
             _ => route(&[w[0], w[1]]),
         };
-        if w[0] != key.0 {
-            hop.reverse();
-        }
         if path.is_empty() {
             idx.push(0);
         } else {
