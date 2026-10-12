@@ -6,6 +6,7 @@
 //! distance, work vs shop by the hour), at a rate that follows the simulated car trips, slowed by the live
 //! congestion. A capped pool of 420 dots draws them. Cars are visual only (D-2).
 use crate::camera::MapCam;
+use crate::shell::RoadClasses;
 use crate::zones::{CityPlan, GrowthLink, Y_ROAD};
 use bevy::prelude::*;
 use city::{RoadClass, Router, Trip};
@@ -16,8 +17,6 @@ const W_LOCAL: f32 = 1.0;
 const W_ARTERIAL: f32 = 1.9;
 /// Zoomed out beyond this view height: congestion tint instead of car dots.
 pub const TINT_VIEW: f32 = 110.0;
-/// Car dots are shown at or below this view height.
-pub const CAR_VIEW: f32 = 120.0;
 /// Hard cap on rendered cars at any zoom (the pool size).
 pub const MAX_CARS: usize = 420;
 const TINT_BUCKETS: usize = 8;
@@ -38,6 +37,26 @@ struct RoadEdge(usize);
 
 #[derive(Component)]
 struct RoadCasing(usize);
+
+/// Lane marking on road `edge`: `k` = 0 centreline, else a lane divider `k` lanes out to each side (`side` +-1).
+#[derive(Component)]
+struct RoadMark {
+    edge: usize,
+    k: u8,
+    side: f32,
+}
+
+#[derive(Resource)]
+struct MarkAssets(Handle<Mesh>, Handle<StandardMaterial>);
+
+/// Marking width (world units): thin when zoomed in, grown with the view so it never vanishes zoomed out.
+pub fn mark_width(view_h: f32) -> f32 {
+    (view_h * 0.004).clamp(0.12, 1.2)
+}
+/// Car marker scale: real size zoomed in, enlarged zoomed out so aggregated traffic stays visible.
+pub fn car_scale(view_h: f32) -> f32 {
+    (view_h / 60.0).clamp(1.0, 4.0)
+}
 
 /// Current material bucket of a road stroke (NEUTRAL = class colour).
 #[derive(Component)]
@@ -175,7 +194,7 @@ pub struct RoadsPlugin;
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_roads).add_systems(Update, (update_roads, drive_cars));
+        app.add_systems(Startup, spawn_roads).add_systems(Update, (update_roads, update_marks, drive_cars));
     }
 }
 
@@ -220,8 +239,72 @@ fn spawn_roads(
     for i in 0..MAX_CARS {
         commands.spawn((CarDot(i), Mesh3d(car_mesh.clone()), MeshMaterial3d(car.clone()), Transform::from_xyz(0.0, Y_CAR, 0.0), Visibility::Hidden));
     }
+    let mark_mat = flat(Color::srgb(0.97, 0.97, 0.9));
+    commands.insert_resource(MarkAssets(rect.clone(), mark_mat.clone()));
+    for (i, _) in cp.plan.graph.edges.iter().enumerate() {
+        let (a, b) = cp.plan.graph.pos(i);
+        commands.spawn((RoadMark { edge: i, k: 0, side: 0.0 }, Mesh3d(rect.clone()), MeshMaterial3d(mark_mat.clone()), segment_transform(a, b, Y_ROAD + 0.06, 0.2, 0.1), Visibility::Hidden));
+    }
     commands.insert_resource(m);
     commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan) });
+}
+
+/// Lane lines at every zoom: a centreline on every built road, plus dividers on wide classes, scaled with the view.
+#[allow(clippy::too_many_arguments)]
+fn update_marks(
+    link: Res<GrowthLink>,
+    cam: Option<Res<MapCam>>,
+    cp: Res<CityPlan>,
+    classes: Res<RoadClasses>,
+    assets: Res<MarkAssets>,
+    mut marks: Query<(Entity, &RoadMark, &mut Transform, &mut Visibility)>,
+    mut roads: Query<(&RoadEdge, &mut Transform), Without<RoadMark>>,
+    mut commands: Commands,
+    mut last: Local<(i32, u64, bool)>,
+) {
+    let view = cam.as_ref().map_or(100.0, |c| c.view_h);
+    let w = mark_width(view);
+    let s = link.snapshots.latest();
+    let key = ((w * 100.0) as i32, s.tick / 10, classes.is_changed());
+    if *last == key && !classes.is_changed() {
+        return;
+    }
+    *last = key;
+    let lanes = |e: usize| classes.0.get(&e).map_or(0, |c| c.lanes());
+    if classes.is_changed() {
+        for (ent, m, _, _) in &marks {
+            if m.k > 0 {
+                commands.entity(ent).despawn();
+            }
+        }
+        for (&e, c) in &classes.0 {
+            let (a, b) = cp.plan.graph.pos(e);
+            for k in 1..c.lanes() / 2 {
+                for side in [-1.0f32, 1.0] {
+                    commands.spawn((RoadMark { edge: e, k: k as u8, side }, Mesh3d(assets.0.clone()), MeshMaterial3d(assets.1.clone()), segment_transform(a, b, Y_ROAD + 0.06, w, 0.1), Visibility::Hidden));
+                }
+            }
+        }
+        // roads widen with their class (never thinner than the generated stroke)
+        for (r, mut tf) in &mut roads {
+            if let Some(c) = classes.0.get(&r.0) {
+                let (a, b) = cp.plan.graph.pos(r.0);
+                *tf = segment_transform(a, b, Y_ROAD, c.width().max(W_LOCAL), 0.2);
+            }
+        }
+    }
+    for (_, m, mut tf, mut v) in &mut marks {
+        let (a, b) = cp.plan.graph.pos(m.edge);
+        let d = (b - a).normalize_or_zero();
+        let off = Vec2::new(-d.y, d.x) * m.side * m.k as f32 * 0.9;
+        // lanes > 0 only for upgraded roads; a centreline of a 1-lane street would sit in the middle of its only lane
+        let shown = s.built.get(m.edge).copied().unwrap_or(false) && (m.k == 0 || lanes(m.edge) / 2 > m.k as u32);
+        *tf = segment_transform(a + off, b + off, Y_ROAD + 0.06, w, 0.1);
+        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
+        if *v != want {
+            *v = want;
+        }
+    }
 }
 
 fn update_roads(
@@ -272,7 +355,8 @@ fn drive_cars(
     mut was_on: Local<bool>,
     mut dots: Query<(&CarDot, &mut Transform, &mut Visibility)>,
 ) {
-    let on = cam.as_ref().is_some_and(|c| c.view_h <= CAR_VIEW);
+    let view = cam.as_ref().map_or(60.0, |c| c.view_h);
+    let on = true;
     if !on {
         if *was_on {
             *was_on = false;
@@ -310,6 +394,7 @@ fn drive_cars(
         let (p, h) = journey_pose(c);
         tf.translation = Vec3::new(p.x, Y_CAR, p.y);
         tf.rotation = Quat::from_rotation_y(-h.y.atan2(h.x));
+        tf.scale = Vec3::splat(car_scale(view));
         *v = Visibility::Inherited;
     }
 }
@@ -393,5 +478,17 @@ mod tests {
             cars[1].along = 8.0; // pinned stopped
         }
         assert!(cars[0].along <= 8.0 - CAR_LEN, "stopped behind, got {}", cars[0].along);
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    #[test]
+    fn markings_and_cars_stay_visible_zoomed_out() {
+        assert!(mark_width(400.0) > mark_width(40.0) && mark_width(40.0) >= 0.12);
+        assert_eq!(car_scale(30.0), 1.0);
+        assert!(car_scale(300.0) > 2.0);
     }
 }
