@@ -26,3 +26,7 @@ Efficiency (usage audit 2026-10-13):
 - Briefs quote Jai's words and the observable acceptance he will check. R28 brief tested "a car arrives" only; Jai then reported overlap/no kinematics (fix queued 22:07) and random despawns. Acceptance must cover the failure Jai would see, e.g. no overlaps, no mid-trip despawn.
 - Main merges relaunch the Mac game (runner: pull ~1 min + build ~2-6 min per commit; 12 relaunches 09:17-10:08). Batch related slices into one main merge; don't merge main back into a manager branch after every main commit.
 - Model 404: 14 real model_not_found errors this session (7 in main chat, 2 coordinator, 5 managers/workers). After one retry, report and wait; a respawn on the same model is not a retry.
+
+Tooling (Jai 2026-10-13):
+- Search before reading: `~/.local/bin/norby-code-search --repo <your worktree> search "question" --limit 3` (macrometro is registered); `docs/CORPUS.md` lists every module's pub items, regenerated with `tools/corpus` at each merge (`tools/corpus --check` fails if stale).
+- Queue: never hand-edit the Queue table; use `tools/queue list|next|add|set-status|set-owner|done`. Other doc sections: `tools/section FILE "Heading"` to read, `... --replace` with stdin to rewrite.
