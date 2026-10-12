@@ -767,6 +767,11 @@ fn gen_town(seed: u64, region: &CityRegion, plan: &mut TownPlan) {
         e.order = if d.is_finite() { d.round() as u32 } else { 9999 };
     }
 
+    // R31: generated roads keep their class's minimum radius; near-collinear through nodes merge onto the line
+    let land_seed = gn.seed;
+    let classes: Vec<crate::lanes::LaneClass> = gn.g.edges.iter().map(|e| crate::lanes::default_class(e.class)).collect();
+    crate::junctions::smooth(gn.g, |e| classes[e], |p| is_land(land_seed, p));
+
     // parcels both sides of every edge, clear of other roads and water, thinning with distance
     let g = &*gn.g;
     let deg: Vec<usize> = {

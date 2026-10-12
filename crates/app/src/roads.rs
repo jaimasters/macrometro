@@ -383,6 +383,21 @@ fn update_marks(
                 commands.spawn((m, Mesh3d(assets.0.clone()), MeshMaterial3d(mat), mark_transform(&m, a, b, w), if shown { Visibility::Inherited } else { Visibility::Hidden }));
             }
         }
+        // R31: at-grade junctions are roundabouts sized by their widest road: a ring of marks in the first edge's frame
+        for (n, es) in deg.iter().enumerate() {
+            let cls: Vec<_> = es.iter().map(|&e| classes.0.get(&e).copied().unwrap_or_else(|| city::lanes::default_class(cp.plan.graph.edges[e].class))).collect();
+            let city::junctions::Junction::Roundabout(r) = city::junctions::junction(&cls) else { continue };
+            let e = es[0];
+            let (a, b) = cp.plan.graph.pos(e);
+            let (d, c) = ((b - a).normalize_or_zero(), cp.plan.graph.nodes[n]);
+            let local = |p: Vec2| Vec2::new((p - a).dot(d), (p - a).dot(Vec2::new(-d.y, d.x)));
+            let pt = |i: usize| c + Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0) * r;
+            let shown = s.built.get(e).copied().unwrap_or(false);
+            for i in 0..16 {
+                let m = RoadMark { edge: e, p: local(pt(i)), q: local(pt(i + 1)), yellow: false, fat: 1.0 };
+                commands.spawn((m, Mesh3d(assets.0.clone()), MeshMaterial3d(assets.1.clone()), mark_transform(&m, a, b, w), if shown { Visibility::Inherited } else { Visibility::Hidden }));
+            }
+        }
         // roads widen with their class (never thinner than the generated stroke)
         for (r, mut tf) in &mut roads {
             if let Some(c) = classes.0.get(&r.0) {
