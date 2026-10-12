@@ -19,6 +19,8 @@ const PLAN: f64 = 0.9;
 /// Gap between successive departures from the first stop (seconds).
 pub const HEADWAY: f64 = 40.0;
 const MAX_TRAINS: usize = 8;
+/// Most trains the player can add to a line on top of the scheduled fleet (R37).
+pub const MAX_EXTRA_TRAINS: usize = 4;
 /// Passengers a train carries at most, share of the load that gets off at each stop, and the cap on a station queue.
 pub const TRAIN_CAPACITY: f64 = 60.0;
 const ALIGHT: f64 = 0.4;
@@ -157,6 +159,8 @@ pub struct TrainSim {
     /// People waiting per station node, and the arrival rate (people / s) the app feeds in from the city.
     pub waiting: BTreeMap<u32, f64>,
     pub arrivals: BTreeMap<u32, f64>,
+    /// Trains the player bought per line (on top of the scheduled fleet).
+    pub extra: BTreeMap<u32, usize>,
 }
 
 impl TrainSim {
@@ -235,7 +239,7 @@ impl TrainSim {
         for ri in 0..self.routes.len() {
             let r = &mut self.routes[ri];
             r.since_spawn = r.since_spawn.saturating_add(1);
-            if r.spawned >= r.wants() || (r.since_spawn as f64) * DT < HEADWAY {
+            if r.spawned >= r.wants() + self.extra.get(&r.line.0).copied().unwrap_or(0) || (r.since_spawn as f64) * DT < HEADWAY {
                 continue;
             }
             let (line, class, node) = (r.line, r.class, r.stops[0]);
@@ -486,6 +490,16 @@ impl TrainSim {
     /// Track count of the segment the train is on.
     pub fn tracks_under(&self, net: &Network, t: &Train) -> u8 {
         net.edges[self.edge_under(t)].tracks
+    }
+
+    /// Buy one more train for `line`; false at the cap.
+    pub fn add_train(&mut self, line: LineId) -> bool {
+        let e = self.extra.entry(line.0).or_default();
+        if *e >= MAX_EXTRA_TRAINS {
+            return false;
+        }
+        *e += 1;
+        true
     }
 
     /// People waiting at a station node.

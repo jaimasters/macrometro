@@ -15,6 +15,8 @@ use ui_tools::{octilinear, path_len, route, ActiveAgency, ToolAction, ToolComman
 pub const PLAYER: AgencyId = AgencyId(1);
 const STATION_COST: f64 = 50.0;
 /// Price of one extra platform (B2 station menu; C1 trains need platforms to enter).
+/// Price of one more train on a line.
+pub const TRAIN_COST: f64 = 60.0;
 pub const PLATFORM_COST: f64 = 40.0;
 
 // Flat layer stack (world y): land 0 < ghosts 0.5 < zones 1 < lines 2 < preview 2.6 < station outline 3 < station 3.3 < train 4.5.
@@ -291,7 +293,7 @@ pub fn to_transit_with(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]
             }
         }
         // upgrades that need the live net/city are applied in `apply_tool_commands`
-        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } | ToolAction::UpgradeRoad { .. } => {}
+        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } | ToolAction::UpgradeRoad { .. } | ToolAction::AddTrain { .. } => {}
         ToolAction::AddPlatform { .. } => {
             if let Some(n) = known {
                 out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
@@ -398,6 +400,13 @@ pub fn steer_point(a: IVec2, b: IVec2) -> Option<Vec2> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Resources bundled so the system stays under Bevy's parameter limit.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ExtraRes<'w> {
+    classes: ResMut<'w, RoadClasses>,
+    trains: ResMut<'w, crate::rails::Trains>,
+}
+
 fn apply_tool_commands(
     mut cmds: MessageReader<ToolCommand>,
     mut transit: ResMut<TransitCommands>,
@@ -411,15 +420,22 @@ fn apply_tool_commands(
     seed: Res<world_gen::WorldSeed>,
     mut razed: ResMut<Razed>,
     mut geoms: ResMut<RailGeoms>,
-    mut classes: ResMut<RoadClasses>,
+    extra: ExtraRes,
     mut eco: ResMut<Economy>,
     mut spend: ResMut<SpendQueue>,
     mut sound: MessageWriter<SoundEvent>,
 ) {
+    let ExtraRes { mut classes, mut trains } = extra;
     let centres: Vec<Vec2> = layout.0.iter().map(|g| g.center).collect();
     let pan = |p: Vec2| cam.as_ref().map_or(0.0, |c| ((p.x - c.focus.x) / c.view_h).clamp(-1.0, 1.0));
     for c in cmds.read() {
         match &c.action {
+            ToolAction::AddTrain { line } => {
+                if trains.0.add_train(transit::LineId(*line as u32)) {
+                    spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount: TRAIN_COST });
+                }
+                continue;
+            }
             ToolAction::UpgradeRoad { edge } => {
                 let snap = link.snapshots.latest();
                 razed.0.resize(cp.plan.parcels.len(), false);

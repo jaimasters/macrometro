@@ -31,7 +31,7 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | R29 | Car kinematics: cars keep lane, accelerate/brake, queue, never overlap | Car-following like trains over the routed road polyline | mgr-city | In progress (car-following + tests merged-ready; not seen on screen) | |
 | R30 | Click a road or track segment (pan mode) for a menu; train load indicator | Road lane upgrade, track +track/curve/bridge; occupancy bar | mgr-city | Merged-ready (R32 real load and waiting counts replace the estimate) | |
 | R36 | Driveways: every building has a short driveway to its nearest road; trips start/end there | Driveway stub drawn once the road is built | mgr-city | In progress (routing + render + test; not seen on screen) | |
-| R37 | +Train button in the track/line menu, priced, capped | | mgr-city | Queued | |
+| R37 | +Train button in the track/line menu, priced, capped | | mgr-city | In progress (+Train in track menu, priced 60, cap 4 extra, saved, sim test; not seen on screen) | |
 | R38 | Sidings/depot: idle and extra trains stored; buying a train needs a free siding slot | | mgr-city | Queued | |
 | R35 | Track realism: sleepers and two rails per track; new lines single track both ways with passing loops; stations default to island platforms | Segment token on single track; 2 platforms default | mgr-city | In progress (sim rule, defaults, tests merged-ready; two rails + sleepers drawn on track, station sprites unchanged; not seen on screen) | |
 | R33 | Crossing bug: a road built after track was laid gets no level crossing | Crossings re-found when built roads change | mgr-city | In progress (fix + test; not seen on screen) | |

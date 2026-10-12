@@ -167,6 +167,12 @@ fn rebuild_menu(
                 let on: Vec<f64> = trains.0.trains.iter().filter(|t| serving.contains(&t.line.0)).map(|t| t.load).collect();
                 let mean = if on.is_empty() { 0.0 } else { on.iter().sum::<f64>() / on.len() as f64 };
                 rows.push((format!("{} tracks, {} train(s), load {:.0}%", e.tracks, on.len(), mean / transit::trains::TRAIN_CAPACITY * 100.0), None));
+                for l in &serving {
+                    let have = trains.0.extra.get(l).copied().unwrap_or(0);
+                    if have < transit::trains::MAX_EXTRA_TRAINS {
+                        rows.push((format!("+ Train on line {}  ({:.0}, {} bought)", l + 1, crate::shell::TRAIN_COST, have), Some(ToolAction::AddTrain { line: *l as usize })));
+                    }
+                }
                 if let Some(c) = Edge::track_cost_between(&net.0, na.unwrap(), nb.unwrap()) {
                     rows.push((format!("+ Track  ({c:.0})"), Some(ToolAction::UpgradeTracks { a, b })));
                 }
