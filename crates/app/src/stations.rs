@@ -37,12 +37,14 @@ pub enum Tier {
 }
 
 /// Drawn width of one track at this zoom: individual rails when zoomed in, the line ribbon otherwise.
+#[cfg(test)]
 pub fn track_width(view_h: f32) -> f32 {
     if view_h < crate::rails::RAIL_VIEW { crate::rails::RAIL_PITCH } else { crate::rails::LINE_WIDTH }
 }
 
 /// Footprint (along, across the track) of a station with `np` platforms and service `level` at this zoom.
 /// Mirrors the meshes `rebuild` spawns for each tier.
+#[cfg(test)]
 pub fn footprint(view_h: f32, np: u8, level: usize) -> Vec2 {
     let len = platform_len(level);
     match tier(view_h) {
@@ -330,7 +332,7 @@ fn rebuild(
         let mo = meshes.add(Capsule2d::new(1.0, (mid_len - 2.0).max(0.01)));
         kids.push(commands.spawn((Tier::Mid, Visibility::Hidden, Mesh3d(mo.clone()), MeshMaterial3d(mats.ink.clone()), { let mut t = pose(Vec3::new(0.0, Y_OUTLINE, 0.0), ga); t.scale = Vec3::new(1.0, 1.0, 1.0); t })).id());
         let mi = meshes.add(Capsule2d::new(0.7, (mid_len - 2.0).max(0.01)));
-        kids.push(commands.spawn((Tier::Mid, Visibility::Hidden, Mesh3d(mi), MeshMaterial3d(mats.white.clone()), pose(Vec3::new(0.0, Y_FILL, 0.0), ga))).id());
+        kids.push(commands.spawn((Tier::Mid, Visibility::Hidden, Mesh3d(mi), MeshMaterial3d(gs[0].lines.first().map_or(mats.stub.clone(), |&id| line_mats.entry(id).or_insert_with(|| materials.add(StandardMaterial { base_color: line_colour(id), unlit: true, ..default() })).clone())), pose(Vec3::new(0.0, Y_FILL, 0.0), ga))).id());
         // far: transit-map marker, white disc with a dark outline (sized per frame)
         let disc = meshes.add(Cylinder::new(0.5, 0.2));
         kids.push(commands.spawn((Tier::Far, MarkerRing, Visibility::Hidden, Mesh3d(disc.clone()), MeshMaterial3d(mats.ink.clone()), Transform::from_xyz(0.0, Y_OUTLINE, 0.0))).id());
