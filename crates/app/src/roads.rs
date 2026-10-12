@@ -184,17 +184,21 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32) {
 }
 
 /// Position and heading of a journey (driving on one side of the road).
-fn journey_pose(j: &Journey) -> (Vec2, Vec2) {
+/// Drive on the left instead of the right (R34). Saved with the game.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LeftHand(pub bool);
+
+fn journey_pose(j: &Journey, left: bool) -> (Vec2, Vec2) {
     let (a, b) = (j.trip.pts[j.seg], j.trip.pts[j.seg + 1]);
     let d = (b - a).normalize_or_zero();
-    (a + d * j.along + Vec2::new(-d.y, d.x) * 0.55, d)
+    (a + d * j.along + Vec2::new(-d.y, d.x) * if left { -0.55 } else { 0.55 }, d)
 }
 
 pub struct RoadsPlugin;
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_roads).add_systems(Update, (update_roads, update_marks, drive_cars));
+        app.init_resource::<LeftHand>().add_systems(Startup, spawn_roads).add_systems(Update, (update_roads, update_marks, drive_cars));
     }
 }
 
@@ -351,6 +355,7 @@ fn drive_cars(
     time: Res<Time>,
     link: Res<GrowthLink>,
     cam: Option<Res<MapCam>>,
+    hand: Res<LeftHand>,
     mut j: ResMut<Journeys>,
     mut was_on: Local<bool>,
     mut dots: Query<(&CarDot, &mut Transform, &mut Visibility)>,
@@ -391,7 +396,7 @@ fn drive_cars(
             }
             continue;
         };
-        let (p, h) = journey_pose(c);
+        let (p, h) = journey_pose(c, hand.0);
         tf.translation = Vec3::new(p.x, Y_CAR, p.y);
         tf.rotation = Quat::from_rotation_y(-h.y.atan2(h.x));
         tf.scale = Vec3::splat(car_scale(view));
@@ -432,10 +437,10 @@ mod tests {
         let mut j = journey(2.0); // 3 world units/s
         assert!(advance(&mut j, 2.0, |_| 1.0));
         assert_eq!(j.seg, 0);
-        assert!((journey_pose(&j).0.x - 6.0).abs() < 1e-4);
+        assert!((journey_pose(&j, false).0.x - 6.0).abs() < 1e-4);
         assert!(advance(&mut j, 2.0, |_| 1.0), "rounds the corner onto the next road");
         assert_eq!(j.seg, 1);
-        assert!(journey_pose(&j).0.y > 1.0 && journey_pose(&j).1.y > 0.9);
+        assert!(journey_pose(&j, false).0.y > 1.0 && journey_pose(&j, false).1.y > 0.9);
         assert!(!advance(&mut j, 10.0, |_| 1.0), "arrived: despawn");
     }
 
@@ -479,7 +484,14 @@ mod tests {
         }
         assert!(cars[0].along <= 8.0 - CAR_LEN, "stopped behind, got {}", cars[0].along);
     }
+
+    #[test]
+    fn left_hand_driving_flips_the_lane_side() {
+        let j = journey(2.0);
+        assert!(journey_pose(&j, false).0.y > 0.0 && journey_pose(&j, true).0.y < 0.0);
+    }
 }
+
 
 #[cfg(test)]
 mod zoom_tests {

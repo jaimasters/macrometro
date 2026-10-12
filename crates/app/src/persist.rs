@@ -70,6 +70,9 @@ pub struct GameSave {
     /// Placer results per segment (older saves have none: segments are laid straight).
     #[serde(default)]
     pub rails: Vec<RailSave>,
+    /// Drive on the left (older saves: right).
+    #[serde(default)]
+    pub left_hand: bool,
     /// Upgraded road lane classes (edge, class index).
     #[serde(default)]
     pub lanes: Vec<(u32, u8)>,
@@ -180,7 +183,7 @@ impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ResetState>()
             .add_systems(Startup, (restore_game, spawn_reset_ui))
-            .add_systems(Update, (autosave, reset_ui))
+            .add_systems(Update, (autosave, reset_ui, hand_ui))
             .add_systems(Last, save_on_exit);
     }
 }
@@ -196,6 +199,7 @@ struct Collect<'w> {
     eco: Res<'w, Economy>,
     geoms: Res<'w, RailGeoms>,
     classes: Res<'w, RoadClasses>,
+    hand: Res<'w, crate::roads::LeftHand>,
 }
 
 impl Collect<'_> {
@@ -250,6 +254,7 @@ impl Collect<'_> {
             platforms: self.stations.0.iter().filter_map(|c| Some((xy(c), self.net.0.platform_count(self.map.node(*c)?)))).collect(),
             tracks,
             rails,
+            left_hand: self.hand.0,
             lanes: { let mut v: Vec<(u32, u8)> = self.classes.0.iter().map(|(e, c)| (*e as u32, *c as u8)).collect(); v.sort(); v },
             agencies: self
                 .eco
@@ -275,9 +280,11 @@ fn restore_game(
     mut geoms: ResMut<RailGeoms>,
     mut razed: ResMut<Razed>,
     mut classes: ResMut<RoadClasses>,
+    mut hand: ResMut<crate::roads::LeftHand>,
     link: Res<crate::zones::GrowthLink>,
 ) {
     let Some(g) = &loaded.0 else { return };
+    hand.0 = g.left_hand;
     for &(e, c) in &g.lanes {
         classes.0.insert(e as usize, city::lanes::LANE_CLASSES[(c as usize).min(6)]);
         link.shared.lanes.lock().unwrap().push((e as usize, c));
@@ -369,6 +376,25 @@ fn save_on_exit(mut exit: MessageReader<AppExit>, reset: Res<ResetState>, c: Col
 struct ResetButton;
 #[derive(Component)]
 struct ResetDialog;
+#[derive(Component)]
+struct HandButton;
+
+/// Click the checkbox to flip driving side; the label shows the state.
+fn hand_ui(mouse: Res<ButtonInput<MouseButton>>, mut hand: ResMut<crate::roads::LeftHand>, b: Query<(&Hovered, &Children), With<HandButton>>, mut text: Query<&mut Text>) {
+    for (h, ch) in &b {
+        if mouse.just_released(MouseButton::Left) && h.get() {
+            hand.0 = !hand.0;
+        }
+        for e in ch.iter() {
+            if let Ok(mut t) = text.get_mut(e) {
+                let want = if hand.0 { "[x] Left-hand driving" } else { "[ ] Left-hand driving" };
+                if t.0 != want {
+                    t.0 = want.into();
+                }
+            }
+        }
+    }
+}
 #[derive(Component, PartialEq, Eq, Clone, Copy)]
 enum DialogButton {
     Yes,
@@ -391,6 +417,13 @@ fn spawn_reset_ui(mut commands: Commands) {
         ResetButton,
         Node { position_type: PositionType::Absolute, top: Val::Px(52.0), right: Val::Px(10.0), ..default() },
         children![btn("Reset city", Color::srgba(1.0, 1.0, 1.0, 0.85))],
+    ));
+    commands.spawn((
+        HandButton,
+        Hovered::default(),
+        Node { position_type: PositionType::Absolute, top: Val::Px(92.0), right: Val::Px(10.0), padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)), border_radius: BorderRadius::all(Val::Px(10.0)), ..default() },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+        children![(Text::new("[ ] Left-hand driving"), TextFont { font: crate::hud::ui_font(), font_size: FontSize::Px(14.0), ..default() }, TextColor(INK))],
     ));
     commands
         .spawn((
@@ -486,6 +519,7 @@ mod tests {
             lines: vec![vec![(0, 12), (40, 12)]],
             platforms: vec![((0, 12), 3), ((40, 12), 1)],
             tracks: vec![((0, 12), (40, 12), 4)],
+            left_hand: true,
             lanes: vec![(2, 3)],
             rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)], level: 1 }],
             agencies: vec![AgencySave { id: 1, standing: 0.42, spend: vec![(0, 55.5), (2, 1.0)] }],
@@ -582,5 +616,15 @@ mod tests {
         for (i, c) in CATS.iter().enumerate() {
             assert_eq!(cat_index(*c) as usize, i);
         }
+    }
+
+    #[test]
+    fn left_hand_defaults_off_for_old_saves_and_round_trips() {
+        let mut g = sample();
+        g.left_hand = true;
+        let ron = ron::to_string(&g).unwrap();
+        assert!(ron::from_str::<GameSave>(&ron).unwrap().left_hand);
+        let old = ron.replace("left_hand:true,", "");
+        assert!(!ron::from_str::<GameSave>(&old).unwrap().left_hand);
     }
 }
