@@ -21,7 +21,10 @@ const Y_GAUGE: f32 = 3.6;
 pub const LABEL_VIEW_MAX: f32 = 150.0;
 /// Screen pixels kept free at the bottom for the palette and hint.
 const TOOLBAR_CLEAR: f32 = 130.0;
-const WIDTH: f32 = 3.6;
+/// Whole platform block across the track (all bars plus gaps), sized to sit inside 3 track widths at rail zoom.
+const BLOCK: f32 = 2.4;
+const GAP: f32 = 0.3;
+const OUTLINE: f32 = 0.4;
 /// Zoom tiers (view height): above FAR_VIEW a transit-map marker, above NEAR_VIEW a compact platform, else the full island.
 pub const FAR_VIEW: f32 = 150.0;
 pub const NEAR_VIEW: f32 = 60.0;
@@ -31,6 +34,23 @@ pub enum Tier {
     Far,
     Mid,
     Near,
+}
+
+/// Drawn width of one track at this zoom: individual rails when zoomed in, the line ribbon otherwise.
+pub fn track_width(view_h: f32) -> f32 {
+    if view_h < crate::rails::RAIL_VIEW { crate::rails::RAIL_PITCH } else { crate::rails::LINE_WIDTH }
+}
+
+/// Footprint (along, across the track) of a station with `np` platforms and service `level` at this zoom.
+/// Mirrors the meshes `rebuild` spawns for each tier.
+pub fn footprint(view_h: f32, np: u8, level: usize) -> Vec2 {
+    let len = platform_len(level);
+    match tier(view_h) {
+        Tier::Near => Vec2::new(len + OUTLINE, BLOCK + OUTLINE),
+        Tier::Mid => Vec2::new(len + 1.0, 2.0),
+        Tier::Far => Vec2::splat(marker_size(view_h)),
+    }
+    .max(Vec2::new(0.0, platform_width(np) + OUTLINE))
 }
 
 pub fn tier(view_h: f32) -> Tier {
@@ -44,12 +64,13 @@ pub fn marker_size(view_h: f32) -> f32 {
 
 /// Width of one platform bar: slimmer when a station has several side by side.
 pub fn platform_width(n: u8) -> f32 {
-    if n <= 1 { WIDTH } else { 2.4 }
+    let n = n.max(1) as f32;
+    (BLOCK - (n - 1.0) * GAP) / n
 }
 
 /// Distance between neighbouring platform bar centres.
 pub fn platform_pitch(n: u8) -> f32 {
-    platform_width(n) + 1.8
+    platform_width(n) + GAP
 }
 
 /// Sideways offset of platform `slot` of `n` from the station centre line.
@@ -253,13 +274,12 @@ fn rebuild(
             let dir = Vec2::new(a.cos(), a.sin());
             let perp = Vec2::new(-dir.y, dir.x);
             // hover/select ring around the whole platform block
-            let block = np as f32 * platform_pitch(np) - 1.8 + (WIDTH - bw);
-            let ring = stadium(&mut meshes, &mut cache, len + 5.0, block.max(bw) + 5.0);
+            let ring = stadium(&mut meshes, &mut cache, len + 1.5, BLOCK + 1.5);
             kids.push(commands.spawn((Mesh3d(ring), MeshMaterial3d(mats.ring_hover.clone()), pose(Vec3::new(0.0, Y_RING, 0.0), a), Ring(cell), Visibility::Hidden)).id());
             // one bar per platform, each striped in the serving lines' colours
             for slot in 0..np {
                 let po = platform_offset(slot, np);
-                let outline = stadium(&mut meshes, &mut cache, len + 1.6, bw + 1.6);
+                let outline = stadium(&mut meshes, &mut cache, len + OUTLINE, bw + OUTLINE);
                 kids.push(commands.spawn((Mesh3d(outline), MeshMaterial3d(mats.ink.clone()), pose(Vec3::new(perp.x * po, Y_OUTLINE, perp.y * po), a))).id());
                 let n = g.lines.len().max(1);
                 for k in 0..n {
@@ -287,7 +307,7 @@ fn rebuild(
                 .spawn((
                     Mesh3d(meshes.add(Cuboid::new(1.0, 0.1, 1.0))),
                     MeshMaterial3d(mats.track.clone()),
-                    Transform { translation: Vec3::new(0.0, Y_TRACK, 0.0), rotation: flat_rot, scale: Vec3::new(full + 0.6, 1.0, 1.0) },
+                    Transform { translation: Vec3::new(0.0, Y_TRACK, 0.0), rotation: flat_rot, scale: Vec3::new(full + 0.6, 1.0, 0.6) },
                 ))
                 .id(),
         );
@@ -297,7 +317,7 @@ fn rebuild(
                     GaugeFill { cell, dir, full, level },
                     Mesh3d(meshes.add(Cuboid::new(1.0, 0.1, 1.0))),
                     MeshMaterial3d(mats.gauge[0].clone()),
-                    Transform { translation: Vec3::new(0.0, Y_GAUGE, 0.0), rotation: flat_rot, scale: Vec3::new(0.01, 1.0, 0.7) },
+                    Transform { translation: Vec3::new(0.0, Y_GAUGE, 0.0), rotation: flat_rot, scale: Vec3::new(0.01, 1.0, 0.4) },
                 ))
                 .id(),
         );
@@ -305,25 +325,6 @@ fn rebuild(
             commands.entity(*k).insert(Tier::Near);
         }
         let ga = gs[0].angle;
-        let gdir = Vec2::new(ga.cos(), ga.sin());
-        let gperp = Vec2::new(-gdir.y, gdir.x);
-        let block = np as f32 * platform_pitch(np) - 1.8;
-        // near: two rails with sleepers either side of the platform block (the island sits between the two tracks)
-        let cube = meshes.add(Cuboid::new(1.0, 0.1, 1.0));
-        let rot = Quat::from_rotation_y(-ga);
-        for side in [-1.0f32, 1.0] {
-            let off = side * (block / 2.0 + 2.2);
-            for r in [-0.3f32, 0.3] {
-                let o = gperp * (off + r);
-                kids.push(commands.spawn((Tier::Near, Mesh3d(cube.clone()), MeshMaterial3d(mats.ink.clone()), Transform { translation: Vec3::new(o.x, Y_FILL - 0.1, o.y), rotation: rot, scale: Vec3::new(len + 6.0, 1.0, 0.18) })).id());
-            }
-            let mut d = -(len + 6.0) / 2.0;
-            while d <= (len + 6.0) / 2.0 {
-                let o = gdir * d + gperp * off;
-                kids.push(commands.spawn((Tier::Near, Mesh3d(cube.clone()), MeshMaterial3d(mats.track.clone()), Transform { translation: Vec3::new(o.x, Y_FILL - 0.15, o.y), rotation: rot, scale: Vec3::new(0.35, 1.0, 1.4) })).id());
-                d += 1.4;
-            }
-        }
         // mid: one compact platform rectangle along the track
         let mid_len = platform_len(level) + 1.0;
         let mo = meshes.add(Capsule2d::new(1.0, (mid_len - 2.0).max(0.01)));
@@ -476,7 +477,7 @@ fn update_gauges(
         // fill grows from the platform's start end
         let start = -g.dir * (g.full / 2.0) + g.dir * (fill / 2.0);
         t.translation = Vec3::new(start.x, Y_GAUGE, start.y);
-        t.scale = Vec3::new(fill, 1.0, 0.7);
+        t.scale = Vec3::new(fill, 1.0, 0.4);
         let want = &mats.gauge[if c < 0.6 { 0 } else if c < 0.85 { 1 } else { 2 }];
         if m.0 != *want {
             m.0 = want.clone();
@@ -567,6 +568,20 @@ mod tests {
         assert!(rgb(crowding_colour(0.3)).green > rgb(crowding_colour(0.3)).red);
         assert!(rgb(crowding_colour(0.7)).red > 0.9 && rgb(crowding_colour(0.7)).green > 0.6);
         assert!(rgb(crowding_colour(0.95)).red > 0.8 && rgb(crowding_colour(0.95)).green < 0.3);
+    }
+
+    #[test]
+    fn station_footprint_fits_track_gauge_and_platform_at_every_zoom() {
+        for view in [30.0, 75.0, 120.0, 400.0, 3000.0] {
+            let tw = track_width(view);
+            for np in [1u8, 2] {
+                for level in [0usize, 1, 3] {
+                    let f = footprint(view, np, level);
+                    assert!(f.y < 3.0 * tw, "view {view} np {np}: across {} >= 3x track {tw}", f.y);
+                    assert!(f.x <= platform_len(level) + tw, "view {view} level {level}: along {} overruns platform", f.x);
+                }
+            }
+        }
     }
 
     #[test]

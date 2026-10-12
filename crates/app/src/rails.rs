@@ -13,7 +13,7 @@ use ui_tools::{path_len, segment_transform};
 
 const Y_LINE: f32 = 2.0;
 const Y_TRAIN: f32 = 4.5;
-const LINE_WIDTH: f32 = 3.2;
+pub const LINE_WIDTH: f32 = 3.2;
 /// Below this view height lines draw as their individual rails.
 pub const RAIL_VIEW: f32 = 90.0;
 const RAIL_W: f32 = 0.16;
