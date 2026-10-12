@@ -42,16 +42,76 @@ struct RoadCasing(usize);
 #[derive(Component)]
 struct Driveway(usize);
 
-/// Lane marking on road `edge`: `k` = 0 centreline, else a lane divider `k` lanes out to each side (`side` +-1).
-#[derive(Component)]
+/// One painted line on road `edge`, in edge-local coordinates (`along`, lateral offset) from `p` to `q`.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 struct RoadMark {
     edge: usize,
-    k: u8,
-    side: f32,
+    p: Vec2,
+    q: Vec2,
+    yellow: bool,
+    /// Stroke width as a multiple of the zoom-scaled mark width (stop bars are fatter).
+    fat: f32,
 }
 
 #[derive(Resource)]
-struct MarkAssets(Handle<Mesh>, Handle<StandardMaterial>);
+struct MarkAssets(Handle<Mesh>, Handle<StandardMaterial>, Handle<StandardMaterial>);
+
+const DASH: f32 = 1.2;
+const DASH_GAP: f32 = 1.8;
+
+/// US-style markings for one road (R29): yellow centre line (double solid on 2-lane fast and wider, dashed on minor
+/// two-way roads, none on a one-lane street), dashed white between same-direction lanes, solid white edge lines, and
+/// a stop bar across the incoming half at every junction end. Left-hand driving keeps colours, mirrors the stop bars.
+fn edge_marks(edge: usize, len: f32, half_w: f32, c: city::lanes::LaneClass, junction: [bool; 2], left: bool) -> Vec<RoadMark> {
+    use city::lanes::LaneClass::*;
+    let line = |p: Vec2, q: Vec2, yellow: bool| RoadMark { edge, p, q, yellow, fat: 1.0 };
+    let mut v = vec![];
+    let dashed = |v: &mut Vec<RoadMark>, off: f32, yellow: bool| {
+        let mut t = DASH_GAP / 2.0;
+        while t + DASH < len {
+            v.push(line(Vec2::new(t, off), Vec2::new(t + DASH, off), yellow));
+            t += DASH + DASH_GAP;
+        }
+    };
+    match c {
+        Street => {}
+        TwoLaneLow => dashed(&mut v, 0.0, true),
+        _ => {
+            for o in [-0.12, 0.12] {
+                v.push(line(Vec2::new(0.0, o), Vec2::new(len, o), true));
+            }
+        }
+    }
+    for k in 1..c.lanes() / 2 {
+        for side in [-1.0, 1.0] {
+            dashed(&mut v, side * k as f32 * 0.9, false);
+        }
+    }
+    let edge_off = half_w - 0.1;
+    for side in [-1.0, 1.0] {
+        v.push(line(Vec2::new(0.0, side * edge_off), Vec2::new(len, side * edge_off), false));
+    }
+    // traffic toward the end at `along = len` drives on the +lateral side (right-hand), toward 0 on the - side
+    let s = if left { -1.0 } else { 1.0 };
+    for (end, at, dir) in [(1, len, s), (0, 0.0, -s)] {
+        if junction[end] && len > 4.0 {
+            let t = if end == 1 { at - 1.6 } else { at + 1.6 };
+            v.push(RoadMark { edge, p: Vec2::new(t, 0.0), q: Vec2::new(t, dir * edge_off), yellow: false, fat: 2.5 });
+        }
+    }
+    v
+}
+
+fn mark_transform(m: &RoadMark, a: Vec2, b: Vec2, w: f32) -> Transform {
+    let d = (b - a).normalize_or_zero();
+    let n = Vec2::new(-d.y, d.x);
+    let at = |l: Vec2| a + d * l.x + n * l.y;
+    let (p, mut q) = (at(m.p), at(m.q));
+    if p.distance(q) < 1e-3 {
+        q = p + d * 0.01;
+    }
+    segment_transform(p, q, Y_ROAD + 0.06, w * m.fat, 0.1)
+}
 
 /// Marking width (world units): thin when zoomed in, grown with the view so it never vanishes zoomed out.
 pub fn mark_width(view_h: f32) -> f32 {
@@ -276,50 +336,51 @@ fn spawn_roads(
             commands.spawn((Driveway(pc.access), Mesh3d(rect.clone()), MeshMaterial3d(drive.clone()), segment_transform(pc.center, foot, Y_ROAD - 0.02, 0.5, 0.1), Visibility::Hidden));
         }
     }
-    let mark_mat = flat(Color::srgb(0.97, 0.97, 0.9));
-    commands.insert_resource(MarkAssets(rect.clone(), mark_mat.clone()));
-    for (i, _) in cp.plan.graph.edges.iter().enumerate() {
-        let (a, b) = cp.plan.graph.pos(i);
-        commands.spawn((RoadMark { edge: i, k: 0, side: 0.0 }, Mesh3d(rect.clone()), MeshMaterial3d(mark_mat.clone()), segment_transform(a, b, Y_ROAD + 0.06, 0.2, 0.1), Visibility::Hidden));
-    }
+    commands.insert_resource(MarkAssets(rect.clone(), flat(Color::srgb(0.97, 0.97, 0.94)), flat(Color::srgb(0.98, 0.78, 0.12))));
     commands.insert_resource(m);
     commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan) });
 }
 
-/// Lane lines at every zoom: a centreline on every built road, plus dividers on wide classes, scaled with the view.
+/// Road markings at every zoom: rebuilt when classes or the driving side change, stroke scaled with the view.
 #[allow(clippy::too_many_arguments)]
 fn update_marks(
     link: Res<GrowthLink>,
     cam: Option<Res<MapCam>>,
     cp: Res<CityPlan>,
     classes: Res<RoadClasses>,
+    hand: Res<LeftHand>,
     assets: Res<MarkAssets>,
     mut marks: Query<(Entity, &RoadMark, &mut Transform, &mut Visibility)>,
     mut roads: Query<(&RoadEdge, &mut Transform), Without<RoadMark>>,
     mut commands: Commands,
-    mut last: Local<(i32, u64, bool)>,
+    mut last: Local<(i32, u64)>,
+    mut built_once: Local<bool>,
 ) {
     let view = cam.as_ref().map_or(100.0, |c| c.view_h);
     let w = mark_width(view);
     let s = link.snapshots.latest();
-    let key = ((w * 100.0) as i32, s.tick / 10, classes.is_changed());
-    if *last == key && !classes.is_changed() {
+    let rebuild = !*built_once || classes.is_changed() || hand.is_changed();
+    let key = ((w * 100.0) as i32, s.tick / 10);
+    if *last == key && !rebuild {
         return;
     }
     *last = key;
-    let lanes = |e: usize| classes.0.get(&e).map_or(0, |c| c.lanes());
-    if classes.is_changed() {
-        for (ent, m, _, _) in &marks {
-            if m.k > 0 {
-                commands.entity(ent).despawn();
-            }
+    if rebuild {
+        *built_once = true;
+        for (ent, ..) in &marks {
+            commands.entity(ent).despawn();
         }
-        for (&e, c) in &classes.0 {
+        let deg = cp.plan.graph.incident();
+        for (e, ed) in cp.plan.graph.edges.iter().enumerate() {
+            let c = classes.0.get(&e).copied().unwrap_or_else(|| city::lanes::default_class(ed.class));
+            let base = if ed.class == RoadClass::Arterial { W_ARTERIAL } else { W_LOCAL };
+            let half = if classes.0.contains_key(&e) { c.width().max(W_LOCAL) } else { base } / 2.0;
             let (a, b) = cp.plan.graph.pos(e);
-            for k in 1..c.lanes() / 2 {
-                for side in [-1.0f32, 1.0] {
-                    commands.spawn((RoadMark { edge: e, k: k as u8, side }, Mesh3d(assets.0.clone()), MeshMaterial3d(assets.1.clone()), segment_transform(a, b, Y_ROAD + 0.06, w, 0.1), Visibility::Hidden));
-                }
+            let junction = [deg[ed.a as usize].len() >= 3, deg[ed.b as usize].len() >= 3];
+            for m in edge_marks(e, a.distance(b), half, c, junction, hand.0) {
+                let mat = if m.yellow { assets.2.clone() } else { assets.1.clone() };
+                let shown = s.built.get(e).copied().unwrap_or(false);
+                commands.spawn((m, Mesh3d(assets.0.clone()), MeshMaterial3d(mat), mark_transform(&m, a, b, w), if shown { Visibility::Inherited } else { Visibility::Hidden }));
             }
         }
         // roads widen with their class (never thinner than the generated stroke)
@@ -329,15 +390,12 @@ fn update_marks(
                 *tf = segment_transform(a, b, Y_ROAD, c.width().max(W_LOCAL), 0.2);
             }
         }
+        return;
     }
     for (_, m, mut tf, mut v) in &mut marks {
         let (a, b) = cp.plan.graph.pos(m.edge);
-        let d = (b - a).normalize_or_zero();
-        let off = Vec2::new(-d.y, d.x) * m.side * m.k as f32 * 0.9;
-        // lanes > 0 only for upgraded roads; a centreline of a 1-lane street would sit in the middle of its only lane
-        let shown = s.built.get(m.edge).copied().unwrap_or(false) && (m.k == 0 || lanes(m.edge) / 2 > m.k as u32);
-        *tf = segment_transform(a + off, b + off, Y_ROAD + 0.06, w, 0.1);
-        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
+        *tf = mark_transform(m, a, b, w);
+        let want = if s.built.get(m.edge).copied().unwrap_or(false) { Visibility::Inherited } else { Visibility::Hidden };
         if *v != want {
             *v = want;
         }
@@ -559,6 +617,22 @@ mod tests {
             }
         }
         assert!(spawned > 40 && cars.len() < 30, "traffic flows: {spawned} spawned, {} still queued", cars.len());
+    }
+
+    #[test]
+    fn us_markings_by_class_and_side() {
+        use city::lanes::LaneClass::*;
+        let yellow = |v: &[RoadMark]| v.iter().filter(|m| m.yellow).count();
+        let minor = edge_marks(0, 30.0, 0.9, TwoLaneLow, [false; 2], false);
+        assert!(yellow(&minor) > 3 && minor.iter().filter(|m| m.yellow).all(|m| m.q.x - m.p.x <= DASH + 1e-4), "dashed yellow centre");
+        let big = edge_marks(0, 30.0, 1.8, FourLane, [false; 2], false);
+        assert_eq!(big.iter().filter(|m| m.yellow && m.q.x - m.p.x == 30.0).count(), 2, "double solid yellow");
+        assert!(big.iter().any(|m| !m.yellow && m.p.y.abs() == 0.9 && m.q.x - m.p.x <= DASH + 1e-4), "dashed white lane line");
+        assert_eq!(big.iter().filter(|m| !m.yellow && m.p.y.abs() > 1.6 && m.q.x - m.p.x == 30.0).count(), 2, "solid white edges");
+        assert_eq!(yellow(&edge_marks(0, 30.0, 0.5, Street, [false; 2], false)), 0);
+        let bar = |left| edge_marks(0, 30.0, 0.9, TwoLaneLow, [false, true], left).into_iter().find(|m| m.fat > 1.0).unwrap();
+        let (r, l) = (bar(false), bar(true));
+        assert!(r.q.y > 0.0 && l.q.y < 0.0 && r.yellow == l.yellow, "stop bar mirrors with the driving side");
     }
 
     #[test]
