@@ -169,6 +169,9 @@ struct Journey {
     v: f32,
     /// Seconds stopped (gridlock breaker: the longest waiter may enter a held junction).
     wait: f32,
+    /// Stable car slot = the CarDot drawing it. Cars are removed from the middle of `cars` on arrival, so the Vec
+    /// index is not an identity (indexing dots by it made the remaining cars jump between dots: "random vanishing").
+    slot: usize,
 }
 
 #[derive(Resource)]
@@ -574,12 +577,17 @@ fn drive_cars(
             if !j.cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts.first() == trip.pts.first()) {
                 let mut trip = trip;
                 ring_trip(&mut trip, &j.rings, hand.0);
-                j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
+                let slot = (0..MAX_CARS).find(|k| !j.cars.iter().any(|c| c.slot == *k)).unwrap_or(0);
+                j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot });
             }
         }
     }
+    let mut by_slot = vec![None; MAX_CARS];
+    for c in &j.cars {
+        by_slot[c.slot] = Some(c);
+    }
     for (d, mut tf, mut v) in &mut dots {
-        let Some(c) = j.cars.get(d.0) else {
+        let Some(c) = by_slot.get(d.0).copied().flatten() else {
             if *v != Visibility::Hidden {
                 *v = Visibility::Hidden;
             }
@@ -618,7 +626,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
         };
-        Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 }
+        Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot: 0 }
     }
 
     #[test]
@@ -688,7 +696,7 @@ mod tests {
                     let out = dirs[(k + 1 + step / 15 % 3) % 4];
                     let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
+                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot: 0 });
                         spawned += 1;
                     }
                 }
@@ -740,13 +748,20 @@ mod tests {
                     let mut trip = trip;
                     ring_trip(&mut trip, &rings, true);
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
+                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot: 0 });
                     }
                 }
             }
             let n = cars.len();
+            for (k, c) in cars.iter_mut().enumerate() {
+                c.slot = k + step * 100;
+            }
+            let left: Vec<(usize, f32)> = cars.iter().map(|c| (c.slot, (c.seg..c.trip.pts.len() - 1).map(|s| c.trip.pts[s].distance(c.trip.pts[s + 1])).sum::<f32>() - c.along)).collect();
             follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
             done += n - cars.len();
+            for (id, rest) in left.into_iter().filter(|(id, _)| !cars.iter().any(|c| c.slot == *id)) {
+                assert!(rest < 0.5, "car {id} removed {rest} short of its destination at step {step}");
+            }
             for i in 0..cars.len() {
                 for j in i + 1..cars.len() {
                     let d = journey_pose(&cars[i], false).0.distance(journey_pose(&cars[j], false).0);
