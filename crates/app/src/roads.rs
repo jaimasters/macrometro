@@ -158,6 +158,8 @@ struct Journey {
     along: f32,
     /// Current speed (world units / s): cars accelerate and brake, they do not jump to the limit.
     v: f32,
+    /// Seconds stopped (gridlock breaker: the longest waiter may enter a held junction).
+    wait: f32,
 }
 
 #[derive(Resource)]
@@ -217,23 +219,43 @@ const JUNC: f32 = 1.6;
 /// One car-following step for every car (in index order, deterministic): accelerate toward the congestion-limited
 /// speed, but never faster than lets the car stop behind the one ahead in its lane, or at the stop line of a junction
 /// another car holds. A car just past a node (on the ring) holds it first, so entering cars give way.
-fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32) {
+/// `free(edge)`: the edge is a freeway; a car going freeway to freeway passes the node grade-separated, no hold.
+fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, free: impl Fn(usize) -> bool) {
+    // passing node pts[s+1] from freeway segment s onto freeway segment s+1
+    let thru = |c: &Journey, s: usize| s + 1 < c.trip.seg_edge.len() && free(c.trip.seg_edge[s]) && free(c.trip.seg_edge[s + 1]);
     use std::collections::HashMap;
     let mut lanes: HashMap<Key, Vec<f32>> = HashMap::new();
     let mut held: HashMap<(u32, u32), usize> = HashMap::new();
+    // only real junctions (3+ distinct neighbours over all routes) are held: a through node never blocks the
+    // opposite direction, which deadlocked two-way roads. ponytail: rebuilt per step, cache with the plan if it shows.
+    let mut nb: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+    for c in cars.iter() {
+        for w in c.trip.pts.windows(2) {
+            let (a, b) = (pkey(w[0]), pkey(w[1]));
+            for (x, y) in [(a, b), (b, a)] {
+                let v = nb.entry(x).or_default();
+                if !v.contains(&y) {
+                    v.push(y);
+                }
+            }
+        }
+    }
+    let junc = |p: Vec2| nb.get(&pkey(p)).is_some_and(|v| v.len() >= 3);
     for (i, c) in cars.iter().enumerate() {
         if let Some(k) = lane_key(c) {
             lanes.entry(k).or_default().push(c.along);
         }
-        if c.seg > 0 && c.along < JUNC {
+        if c.seg > 0 && c.along < JUNC && junc(c.trip.pts[c.seg]) && !thru(c, c.seg - 1) {
             held.entry(pkey(c.trip.pts[c.seg])).or_insert(i);
         }
     }
     for (i, c) in cars.iter().enumerate() {
-        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC {
+        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC && junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) {
             held.entry(pkey(c.trip.pts[c.seg + 1])).or_insert(i);
         }
     }
+    // gridlock breaker: the longest-stopped car (over 3 s) ignores junction holds this step
+    let boss = (0..cars.len()).filter(|&i| cars[i].wait > 3.0).max_by(|&a, &b| cars[a].wait.total_cmp(&cars[b].wait));
     let mut keep = vec![];
     for i in 0..cars.len() {
         let c = &cars[i];
@@ -246,9 +268,11 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32) {
                 let ahead = lanes.get(&nk).into_iter().flatten().copied().fold(f32::INFINITY, f32::min);
                 gap = gap.min(len - c.along + ahead - CAR_LEN);
                 let node = pkey(c.trip.pts[c.seg + 1]);
-                if held.get(&node).is_some_and(|&h| h != i) {
+                // enter only when held by no one else AND the exit lane has room: queues form behind the junction
+                let room = ahead >= CAR_LEN + CAR_GAP || !junc(c.trip.pts[c.seg + 1]);
+                if junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && (held.get(&node).is_some_and(|&h| h != i) || !room) && boss != Some(i) {
                     gap = gap.min(len - JUNC - c.along + CAR_GAP);
-                } else if len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
+                } else if !thru(c, c.seg) && len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
                     held.insert(node, i);
                 }
             }
@@ -257,6 +281,7 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32) {
         let c = &mut cars[i];
         c.v += (vmax - c.v).clamp(-CAR_BRAKE * dt, CAR_ACCEL * dt);
         c.v = c.v.max(0.0);
+        c.wait = if c.v < 0.05 { c.wait + dt } else { 0.0 };
         // never step past the stop distance this tick (the speed cap alone can overshoot by v*dt)
         let step = if gap.is_finite() { (c.v * dt).min((gap - CAR_GAP * 0.5).max(0.0)) } else { c.v * dt };
         keep.push(move_by(c, step));
@@ -465,6 +490,7 @@ fn update_roads(
 }
 
 fn drive_cars(
+    classes: Res<RoadClasses>,
     time: Res<Time>,
     link: Res<GrowthLink>,
     cam: Option<Res<MapCam>>,
@@ -489,7 +515,7 @@ fn drive_cars(
     let s = link.snapshots.latest();
     let dt = time.delta_secs().min(0.1);
     let slow = |e: usize| s.slow.get(e).copied().unwrap_or(1.0);
-    follow_step(&mut j.cars, dt, slow);
+    follow_step(&mut j.cars, dt, slow, |e| classes.0.get(&e).is_some_and(|&c| city::junctions::is_freeway(c)));
     j.acc = (j.acc + s.car_trips * SAMPLE * dt).min(6.0);
     while j.acc >= 1.0 && j.cars.len() < MAX_CARS {
         j.acc -= 1.0;
@@ -498,7 +524,7 @@ fn drive_cars(
         if let Some(trip) = j.router.route(&s.built, &s.slow, a, b) {
             // a new car waits at its origin until the lane's entrance is clear
             if !j.cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts.first() == trip.pts.first()) {
-                j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0 });
+                j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
             }
         }
     }
@@ -542,7 +568,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
         };
-        Journey { trip, seg: 0, along: 0.0, v: 0.0 }
+        Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 }
     }
 
     #[test]
@@ -572,7 +598,7 @@ mod tests {
         // the leader crawls (congestion x20); the followers must stack up behind it
         for _ in 0..600 {
             let lead = cars.len() - 1;
-            follow_step(&mut cars, 0.05, |e| if e == 99 { 1.0 } else { 1.0 });
+            follow_step(&mut cars, 0.05, |e| if e == 99 { 1.0 } else { 1.0 }, |_| false);
             let _ = lead;
             if cars.len() < 6 { break; }
             cars.sort_by(|a, b| a.along.total_cmp(&b.along));
@@ -590,7 +616,7 @@ mod tests {
         cars[0].along = 2.0;
         cars[1].along = 8.0;
         for _ in 0..200 {
-            follow_step(&mut cars, 0.05, |_| 1.0);
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
             if cars.len() < 2 { return; }
             cars[1].v = 0.0;
             cars[1].along = 8.0; // pinned stopped
@@ -612,12 +638,12 @@ mod tests {
                     let out = dirs[(k + 1 + step / 15 % 3) % 4];
                     let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0 });
+                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
                         spawned += 1;
                     }
                 }
             }
-            follow_step(&mut cars, 0.05, |_| 1.0);
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
             for left in [false, true] {
                 for i in 0..cars.len() {
                     for j in i + 1..cars.len() {
@@ -631,7 +657,41 @@ mod tests {
                 }
             }
         }
-        assert!(spawned > 40 && cars.len() < 30, "traffic flows: {spawned} spawned, {} still queued", cars.len());
+        assert!(spawned > 40 && cars.len() < 36, "traffic flows: {spawned} spawned, {} still queued", cars.len());
+    }
+
+    /// Headless gridlock: a long run of heavy four-arm traffic. Cars finish in every 10 s window (no deadlock).
+    #[test]
+    fn heavy_junction_traffic_never_deadlocks() {
+        let arm = |d: Vec2| d * 12.0;
+        let dirs = [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y];
+        let mut cars: Vec<Journey> = vec![];
+        let mut done = 0;
+        for step in 0..12000 {
+            if step % 4 == 0 {
+                for (k, &d) in dirs.iter().enumerate() {
+                    let out = dirs[(k + 1 + step / 4 % 3) % 4];
+                    let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
+                    if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
+                        cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
+                    }
+                }
+            }
+            let n = cars.len();
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
+            done += n - cars.len();
+            for i in 0..cars.len() {
+                for j in i + 1..cars.len() {
+                    let d = journey_pose(&cars[i], false).0.distance(journey_pose(&cars[j], false).0);
+                    assert!(d >= 0.6, "overlap ({d}) at step {step}");
+                }
+            }
+            if step % 200 == 199 {
+
+                assert!(done > 0, "no car finished in window ending {step}: deadlock");
+                done = 0;
+            }
+        }
     }
 
     #[test]
