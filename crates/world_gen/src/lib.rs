@@ -1,18 +1,46 @@
 //! Generative, infinitely scaling world: chunk addressing, terrain, linked cities.
-//! Spec: docs/features/world_gen/SPEC.md. Skeleton only: no gameplay yet.
+//! Spec: docs/features/world_gen/SPEC.md. Pure-Rust core (rng/terrain/chunk/city) + thin Bevy plugin.
 use bevy::prelude::*;
 
-/// Integer chunk coordinate at a given level of detail (0 = finest).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChunkCoord { pub x: i64, pub z: i64, pub lod: u8 }
+mod chunk;
+mod city;
+pub mod rng;
+mod terrain;
 
-/// Identifier of a city within the shared logical world.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CityId(pub u32);
+pub use chunk::{chunk_hash, chunk_heights, ChunkCoord, CHUNK_SIZE};
+pub use city::{generate_cities, CityId, CityRegion};
+pub use terrain::{height, SEA_LEVEL};
+
+/// World seed; everything generated derives from it. Insert before adding the plugin to override.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorldSeed(pub u64);
+
+/// Cities of the current world, generated once from `WorldSeed`.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct Cities(pub Vec<CityRegion>);
+
+/// Cities generated at startup (more can be requested via `generate_cities`).
+const STARTUP_CITIES: usize = 3;
 
 /// Public entry point for this feature.
 pub struct WorldGenPlugin;
 
 impl Plugin for WorldGenPlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        app.init_resource::<WorldSeed>();
+        let seed = app.world().resource::<WorldSeed>().0;
+        app.insert_resource(Cities(generate_cities(seed, STARTUP_CITIES)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_inserts_seeded_cities() {
+        let mut app = App::new();
+        app.insert_resource(WorldSeed(5)).add_plugins(WorldGenPlugin);
+        assert_eq!(app.world().resource::<Cities>().0, generate_cities(5, STARTUP_CITIES));
+    }
 }
