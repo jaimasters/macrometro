@@ -223,12 +223,20 @@ R24 road lane classes. A class sets capacity, speed and width; upgrading an edge
 Procedural towns: road graph generation, road growth, traffic and mode choice. Pure Rust (no ECS).
 - mod junctions
 - mod lanes
+- mod organic
 - mod placer
 - mod roadbuild
 - mod roadgen
 - mod traffic
 - mod transit_times
 - mod trips
+
+## crates/city/src/organic.rs
+R42/R43 organic towns: long curving skeleton roads to a fixed reach, curved side streets that branch off and stop
+- const ALL
+- enum Preset
+- fn name
+- fn plan_preset
 
 ## crates/city/src/placer.rs
 Rail track placement (R21, C1): auto-routes a track between two stations as circular arcs, steered by the mouse,
