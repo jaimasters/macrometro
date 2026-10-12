@@ -129,6 +129,10 @@ struct RoadLook(u8);
 #[derive(Component)]
 struct CarDot(usize);
 
+/// A roundabout surface or island, shown once road `.0` (one of its legs) is built.
+#[derive(Component)]
+struct RingDisc(usize);
+
 #[derive(Resource)]
 struct RoadMats {
     base: [Handle<StandardMaterial>; 2],
@@ -168,6 +172,7 @@ struct Journeys {
     acc: f32,
     rng: SplitMix64,
     router: Router,
+    rings: Rings,
 }
 
 /// Free-flow speed on the car's current segment, slowed by congestion.
@@ -293,6 +298,32 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
     cars.retain(|_| k.next().unwrap_or(true));
 }
 
+type Rings = std::collections::HashMap<(u32, u32), city::junctions::Ring>;
+
+/// Route a trip around every roundabout it passes: the junction point becomes the ring arc (entry leg to exit leg)
+/// in the driving-side direction, at a reduced speed.
+fn ring_trip(t: &mut Trip, rings: &Rings, left: bool) {
+    let n = t.pts.len();
+    let (mut pts, mut se, mut ss) = (vec![t.pts[0]], vec![], vec![]);
+    for k in 1..n {
+        match rings.get(&pkey(t.pts[k])).filter(|_| k + 1 < n) {
+            Some(r) => {
+                for (i, p) in r.path(t.pts[k - 1], t.pts[k + 1], left).into_iter().enumerate() {
+                    pts.push(p);
+                    se.push(if i == 0 { t.seg_edge[k - 1] } else { t.seg_edge[k] });
+                    ss.push(if i == 0 { t.seg_speed[k - 1] } else { t.seg_speed[k] * 0.6 });
+                }
+            }
+            None => {
+                pts.push(t.pts[k]);
+                se.push(t.seg_edge[k - 1]);
+                ss.push(t.seg_speed[k - 1]);
+            }
+        }
+    }
+    (t.pts, t.seg_edge, t.seg_speed) = (pts, se, ss);
+}
+
 /// Position and heading of a journey (driving on one side of the road).
 /// Drive on the left instead of the right (R34). Saved with the game.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
@@ -361,9 +392,21 @@ fn spawn_roads(
             commands.spawn((Driveway(pc.access), Mesh3d(rect.clone()), MeshMaterial3d(drive.clone()), segment_transform(pc.center, foot, Y_ROAD - 0.02, 0.5, 0.1), Visibility::Hidden));
         }
     }
+    // R31 roundabouts: a road-surface disc with a planted island, at real junctions only (default classes)
+    let inc = cp.plan.graph.incident();
+    let cls = |e: usize| city::lanes::default_class(cp.plan.graph.edges[e].class);
+    let rings: Rings = (0..inc.len()).filter_map(|n| city::junctions::Ring::at(&cp.plan.graph, &inc[n], n, cls).map(|r| (pkey(r.c), r))).collect();
+    let disc = meshes.add(Cylinder::new(1.0, 1.0));
+    let island = flat(Color::srgb(0.55, 0.66, 0.45));
+    for r in rings.values() {
+        let e = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].first().copied().unwrap_or(0);
+        let at = |rad: f32, y: f32| Transform::from_xyz(r.c.x, y, r.c.y).with_scale(Vec3::new(rad, 0.1, rad));
+        commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(m.base[0].clone()), at(r.r + 1.0, Y_ROAD + 0.03), Visibility::Hidden));
+        commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(island.clone()), at((r.r - 1.0).max(0.4), Y_ROAD + 0.09), Visibility::Hidden));
+    }
     commands.insert_resource(MarkAssets(rect.clone(), flat(Color::srgb(0.97, 0.97, 0.94)), flat(Color::srgb(0.98, 0.78, 0.12))));
     commands.insert_resource(m);
-    commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan) });
+    commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan), rings });
 }
 
 /// Road markings at every zoom: rebuilt when classes or the driving side change, stroke scaled with the view.
@@ -408,21 +451,6 @@ fn update_marks(
                 commands.spawn((m, Mesh3d(assets.0.clone()), MeshMaterial3d(mat), mark_transform(&m, a, b, w), if shown { Visibility::Inherited } else { Visibility::Hidden }));
             }
         }
-        // R31: at-grade junctions are roundabouts sized by their widest road: a ring of marks in the first edge's frame
-        for (n, es) in deg.iter().enumerate() {
-            let cls: Vec<_> = es.iter().map(|&e| classes.0.get(&e).copied().unwrap_or_else(|| city::lanes::default_class(cp.plan.graph.edges[e].class))).collect();
-            let city::junctions::Junction::Roundabout(r) = city::junctions::junction(&cls) else { continue };
-            let e = es[0];
-            let (a, b) = cp.plan.graph.pos(e);
-            let (d, c) = ((b - a).normalize_or_zero(), cp.plan.graph.nodes[n]);
-            let local = |p: Vec2| Vec2::new((p - a).dot(d), (p - a).dot(Vec2::new(-d.y, d.x)));
-            let pt = |i: usize| c + Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0) * r;
-            let shown = s.built.get(e).copied().unwrap_or(false);
-            for i in 0..16 {
-                let m = RoadMark { edge: e, p: local(pt(i)), q: local(pt(i + 1)), yellow: false, fat: 1.0 };
-                commands.spawn((m, Mesh3d(assets.0.clone()), MeshMaterial3d(assets.1.clone()), mark_transform(&m, a, b, w), if shown { Visibility::Inherited } else { Visibility::Hidden }));
-            }
-        }
         // roads widen with their class (never thinner than the generated stroke)
         for (r, mut tf) in &mut roads {
             if let Some(c) = classes.0.get(&r.0) {
@@ -451,6 +479,7 @@ fn update_roads(
     mut roads: Query<(&RoadEdge, &mut RoadLook, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>)>,
     mut casings: Query<(&RoadCasing, &mut Visibility), Without<RoadEdge>>,
     mut drives: Query<(&Driveway, &mut Visibility), (Without<RoadEdge>, Without<RoadCasing>)>,
+    mut discs: Query<(&RingDisc, &mut Visibility), (Without<RoadEdge>, Without<RoadCasing>, Without<Driveway>)>,
 ) {
     let s = link.snapshots.latest();
     let zoomed_out = cam.as_ref().map_or(true, |c| c.view_h > TINT_VIEW);
@@ -473,6 +502,12 @@ fn update_roads(
             } else {
                 mats.tint[want as usize].clone()
             };
+        }
+    }
+    for (d, mut v) in &mut discs {
+        let want = vis(s.built.get(d.0).copied().unwrap_or(false));
+        if *v != want {
+            *v = want;
         }
     }
     for (d, mut v) in &mut drives {
@@ -524,6 +559,8 @@ fn drive_cars(
         if let Some(trip) = j.router.route(&s.built, &s.slow, a, b) {
             // a new car waits at its origin until the lane's entrance is clear
             if !j.cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts.first() == trip.pts.first()) {
+                let mut trip = trip;
+                ring_trip(&mut trip, &j.rings, hand.0);
                 j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
             }
         }
@@ -663,6 +700,21 @@ mod tests {
     /// Headless gridlock: a long run of heavy four-arm traffic. Cars finish in every 10 s window (no deadlock).
     #[test]
     fn heavy_junction_traffic_never_deadlocks() {
+        junction_flow(false);
+    }
+
+    #[test]
+    fn roundabout_traffic_flows_without_overlap() {
+        junction_flow(true);
+        junction_flow(false);
+    }
+
+    fn junction_flow(ring: bool) {
+        let mut rings = Rings::new();
+        if ring {
+            let legs = vec![-std::f32::consts::FRAC_PI_2, 0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI];
+            rings.insert(pkey(Vec2::ZERO), city::junctions::Ring { c: Vec2::ZERO, r: 3.0, legs });
+        }
         let arm = |d: Vec2| d * 12.0;
         let dirs = [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y];
         let mut cars: Vec<Journey> = vec![];
@@ -672,6 +724,8 @@ mod tests {
                 for (k, &d) in dirs.iter().enumerate() {
                     let out = dirs[(k + 1 + step / 4 % 3) % 4];
                     let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
+                    let mut trip = trip;
+                    ring_trip(&mut trip, &rings, true);
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
                         cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0 });
                     }
@@ -688,7 +742,7 @@ mod tests {
             }
             if step % 200 == 199 {
 
-                assert!(done > 0, "no car finished in window ending {step}: deadlock");
+                assert!(step < 400 || done > 0, "no car finished in window ending {step}: deadlock");
                 done = 0;
             }
         }

@@ -84,7 +84,71 @@ pub fn junction(classes: &[LaneClass]) -> Junction {
         return Junction::None;
     }
     let w = classes.iter().map(|c| c.width()).fold(0.0, f32::max);
-    Junction::Roundabout(1.2 + w * 0.8)
+    Junction::Roundabout(2.6 + w * 0.5)
+}
+
+/// A roundabout: cars circulate at radius `r` around `c`; `legs` are the approach angles (radians, ascending).
+#[derive(Debug, Clone)]
+pub struct Ring {
+    pub c: Vec2,
+    pub r: f32,
+    pub legs: Vec<f32>,
+}
+
+impl Ring {
+    /// Ring for node `n` of `g`, or None if it is not an at-grade junction. The ring never reaches past 40% of its
+    /// shortest leg, so it cannot swallow a neighbouring node.
+    pub fn at(g: &RoadGraph, inc: &[usize], n: usize, class: impl Fn(usize) -> LaneClass) -> Option<Ring> {
+        let cls: Vec<_> = inc.iter().map(|&e| class(e)).collect();
+        let Junction::Roundabout(r) = junction(&cls) else { return None };
+        let c = g.nodes[n];
+        let other = |e: usize| g.nodes[if g.edges[e].a as usize == n { g.edges[e].b } else { g.edges[e].a } as usize];
+        let shortest = inc.iter().map(|&e| other(e).distance(c)).fold(f32::INFINITY, f32::min);
+        let mut legs: Vec<f32> = inc.iter().map(|&e| (other(e) - c).to_angle()).collect();
+        legs.sort_by(f32::total_cmp);
+        Some(Ring { c, r: r.min(shortest * 0.4).max(0.8), legs })
+    }
+
+    /// Polygon vertices around the ring: every leg plus the midpoint between neighbouring legs (ascending angle).
+    fn verts(&self) -> Vec<f32> {
+        let n = self.legs.len();
+        let mut v = vec![];
+        for i in 0..n {
+            let (a, mut b) = (self.legs[i], self.legs[(i + 1) % n]);
+            if b <= a {
+                b += std::f32::consts::TAU;
+            }
+            v.extend([a, (a + b) / 2.0]);
+        }
+        v
+    }
+
+    /// Ring points a car drives from the leg toward `from` to the leg toward `to`, circulating anticlockwise for
+    /// right-hand traffic and clockwise for left-hand. Shared vertices let cars on the ring and entering cars meet.
+    pub fn path(&self, from: Vec2, to: Vec2, left_hand: bool) -> Vec<Vec2> {
+        let v = self.verts();
+        let near = |p: Vec2| {
+            let a = (p - self.c).to_angle();
+            (0..v.len()).step_by(2).min_by(|&i, &j| ang(v[i] - a).total_cmp(&ang(v[j] - a))).unwrap()
+        };
+        let (i0, i1) = (near(from), near(to));
+        let step = if ring_dir(left_hand) > 0.0 { 1 } else { v.len() - 1 };
+        let mut out = vec![];
+        let mut i = i0;
+        loop {
+            out.push(self.c + Vec2::from_angle(v[i]) * self.r);
+            i = (i + step) % v.len();
+            if i == i1 {
+                out.push(self.c + Vec2::from_angle(v[i]) * self.r);
+                return out;
+            }
+        }
+    }
+}
+
+fn ang(d: f32) -> f32 {
+    let t = d.rem_euclid(std::f32::consts::TAU);
+    t.min(std::f32::consts::TAU - t)
 }
 
 /// Ring circulation sign: +1 anticlockwise (right-hand traffic), -1 clockwise (left-hand).
@@ -132,5 +196,18 @@ mod tests {
         assert!(big > small);
         assert_eq!(junction(&[FourLane, FourLane]), Junction::None);
         assert_eq!(ring_dir(false), -ring_dir(true));
+    }
+
+    /// R31: a car crossing a four-leg roundabout goes round it anticlockwise (right-hand), clockwise (left-hand).
+    #[test]
+    fn ring_path_circulates_with_the_driving_side() {
+        let ring = Ring { c: Vec2::ZERO, r: 3.0, legs: vec![-1.5707964, 0.0, 1.5707964, 3.1415927] };
+        for left in [false, true] {
+            let p = ring.path(Vec2::new(12.0, 0.0), Vec2::new(-12.0, 0.0), left);
+            assert_eq!(p.len(), 5, "half way round via the midpoints and the side leg");
+            let turn: f32 = p.windows(2).map(|w| w[0].perp_dot(w[1])).sum();
+            assert!(if left { turn < 0.0 } else { turn > 0.0 }, "left={left}: wrong way round");
+            assert!(p.iter().all(|q| (q.length() - 3.0).abs() < 1e-4));
+        }
     }
 }
