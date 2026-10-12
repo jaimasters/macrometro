@@ -2,6 +2,7 @@
 //! Spec: docs/features/city/SPEC.md; design: docs/arch/city-gen.md.
 pub mod junctions;
 pub mod lanes;
+pub mod organic;
 pub mod placer;
 pub mod roadbuild;
 pub mod roadgen;
