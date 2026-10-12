@@ -54,8 +54,8 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | # | Item | Status | Owner | Merge batch |
 |---|------|--------|-------|-------------|
 | 1 | Kinematic cars: bicycle model, pure pursuit, gap-based follow/yield, no spline pose writes, yaw/teleport test | in progress | cars worker (mgr-roads) | B1 |
-| 2 | R41 station proportions (<3x track width, fits platform, oriented) + test | in progress | stations worker (mgr-city) | B1 |
-| 3 | Solid rendering: filled track/line bodies with dark edge, filled platforms, catchment under all without stacking, zoom-stable strokes | in progress | stations worker (mgr-city) | B1 |
+| 2 | R41 station proportions (<3x track width, fits platform, oriented) + test | built (5081dd0), retest at merge | stations worker (mgr-city) | B1 |
+| 3 | Solid rendering: filled track/line bodies with dark edge, filled platforms, catchment under all without stacking, zoom-stable strokes | built (5081dd0), retest at merge | stations worker (mgr-city) | B1 |
 | 4 | R43 wire reset menu to plan_preset (persist.rs) | next | presets worker (after cars) | B2 |
 | 5 | Road spacing: min junction spacing per class, min road length, merge close junctions, roads only on demand, roundabout only if ring clears; spacing/overlap test | next | presets worker | B2 |
 | 6 | Asphalt colour ramp by class (light surface to darkest interstate), everywhere incl. rings/zoomed-out; strictly-darker test | next | presets worker | B2 |
@@ -64,4 +64,6 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | 9 | R42 (d) freeways + overpass drawing; upgrades re-align with eminent domain | later | presets worker | B3 |
 | 10 | R39 remainder: new lines through existing stations; re-lay existing lines | later | unassigned | B3 |
 | 11 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
+| 12 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
+| 13 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
 
