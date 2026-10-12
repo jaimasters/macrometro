@@ -1,6 +1,8 @@
 //! macrometro entry point: all plugins composed by `app`; native and wasm share it.
 //! `MM_WINDOW=WxH` overrides the window size (used to check small windows); `MM_SHOT=file.png` saves a scripted frame.
+use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::prelude::*;
+use std::time::Duration;
 use bevy::window::WindowResolution;
 
 fn main() {
@@ -15,6 +17,10 @@ fn main() {
                 ..default()
             }),
             app::MacrometroPlugins,
+            // Live perf: frame time / fps / entity count to stdout (.game.log) every 5 s.
+            FrameTimeDiagnosticsPlugin::default(),
+            EntityCountDiagnosticsPlugin::default(),
+            LogDiagnosticsPlugin { wait_duration: Duration::from_secs(5), ..default() },
         ))
         .run();
 }
