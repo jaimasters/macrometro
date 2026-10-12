@@ -6,3 +6,5 @@ description = "Rail and road networks; lines with specialisation attributes."
 
 [dependencies]
 bevy.workspace = true
+sim_core = { path = "../sim_core" }
+growth = { path = "../growth" }
