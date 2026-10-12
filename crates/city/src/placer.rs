@@ -8,6 +8,10 @@ use bevy::math::Vec2;
 use transit::{Crossing, CrossingKind};
 
 pub const DEFAULT_RADIUS: f32 = 10.0;
+/// Track leaves a station straight for at least this far (platform plus a train length): turns start beyond it.
+pub const STATION_LEAD: f32 = 12.0;
+/// Tightest bend the placer will lay once the station lead-outs are respected.
+pub const MIN_ARC_RADIUS: f32 = 4.0;
 /// Radii the player can pick when building or upgrade to later.
 pub const RADII: [f32; 4] = [10.0, 20.0, 40.0, 80.0];
 /// Lateral acceleration allowed on a curve: speed limit = sqrt(A_LAT * radius).
@@ -155,7 +159,8 @@ pub fn arc_path(a: Vec2, w: Vec2, b: Vec2, r: f32) -> (Vec<Vec2>, f32) {
         return (vec![a, b], f32::INFINITY);
     }
     let tan_half = (theta / 2.0).tan();
-    let r_eff = r.min(0.5 * d1.min(d2) / tan_half);
+    // the bend may not start inside either station's straight lead-out
+    let r_eff = r.min(0.5 * d1.min(d2) / tan_half).min((d1.min(d2) - STATION_LEAD) / tan_half);
     let t = r_eff * tan_half;
     let (t1, t2) = (w - u1 * t, w + u2 * t);
     let sign = if u1.perp_dot(u2) >= 0.0 { 1.0 } else { -1.0 };
@@ -228,6 +233,9 @@ pub fn merge_crossings(old: &[Crossing], found: &[Crossing]) -> Option<Vec<Cross
 
 pub fn place_via(ctx: &Ctx, a: Vec2, b: Vec2, waypoint: Vec2, radius: f32) -> Option<Placement> {
     let (pts, r_eff) = arc_path(a, waypoint, b, radius);
+    if r_eff.is_finite() && r_eff < MIN_ARC_RADIUS {
+        return None; // no room for a bend between the two station lead-outs
+    }
     let mut cum = vec![0.0f32];
     for w in pts.windows(2) {
         cum.push(cum.last().unwrap() + w[0].distance(w[1]));
@@ -317,7 +325,8 @@ pub fn place_track(ctx: &Ctx, a: Vec2, b: Vec2, steer: Option<Vec2>, radius: f32
             best = Some(p);
         }
     }
-    best
+    // nothing bends legally (hop too short for lead-outs): lay it straight
+    best.or_else(|| place_via(ctx, a, b, a + chord * 0.5, radius))
 }
 
 /// Re-lay an existing placement with a different radius (a later upgrade). The cost to charge is
