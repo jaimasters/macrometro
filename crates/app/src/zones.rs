@@ -107,6 +107,8 @@ pub struct GrowthSnapshot {
     /// Road edges the city has planned but not yet built (D-7 ghosts).
     pub pending: Vec<usize>,
     pub road_reserve: f64,
+    /// Car trips per game hour at this tick's hour (the rate real car journeys are drawn at).
+    pub car_trips: f32,
     /// Per road edge: car flow (veh/h), volume/capacity, congestion slowdown (>= 1).
     pub flow: Vec<f32>,
     pub vc: Vec<f32>,
@@ -224,6 +226,7 @@ impl Simulation for GrowthSimulation {
             built: self.builder.built.clone(),
             pending: self.builder.pending.iter().map(|p| p.0).collect(),
             road_reserve: self.road_reserve,
+            car_trips: self.traffic.out.car_trips as f32,
             flow: self.traffic.flow.iter().map(|&q| q as f32).collect(),
             vc: (0..ne).map(|e| self.traffic.vc(e) as f32).collect(),
             slow: (0..ne).map(|e| self.traffic.slowdown(e) as f32).collect(),

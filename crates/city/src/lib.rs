@@ -3,8 +3,10 @@
 pub mod roadbuild;
 pub mod roadgen;
 pub mod traffic;
+pub mod trips;
 pub mod transit_times;
 pub use roadbuild::*;
 pub use roadgen::*;
 pub use traffic::*;
+pub use trips::*;
 pub use transit_times::*;

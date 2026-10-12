@@ -1,13 +1,16 @@
 //! Road drawing and visible traffic. Built roads are strokes by class (local thin, arterial wider, both thinner
 //! than rail; bridges get a dark casing). Zoomed out: each stroke tints green -> red by volume/capacity.
-//! Zoomed in: a capped pool of car dots whose number follows q*t on each edge, slowing and queueing toward the
-//! downstream end as the edge saturates. Cars are visual only (D-2): positions come from snapshot flows + clock.
+//! Zoomed in: real car journeys (R28). Each car starts at a home building, drives the fastest route over the roads
+//! built right now to a destination building and disappears on arrival. Trips are sampled from the same demand and
+//! mode-choice model as the traffic assignment (home by population and car share, destination by attraction and
+//! distance, work vs shop by the hour), at a rate that follows the simulated car trips, slowed by the live
+//! congestion. A capped pool of 420 dots draws them. Cars are visual only (D-2).
 use crate::camera::MapCam;
 use crate::zones::{CityPlan, GrowthLink, Y_ROAD};
 use bevy::prelude::*;
-use city::{RoadClass, SPEED_ARTERIAL, SPEED_LOCAL};
+use city::{RoadClass, Router, Trip};
 use ui_tools::segment_transform;
-use world_gen::rng::{hash3, unit};
+use world_gen::rng::SplitMix64;
 
 const W_LOCAL: f32 = 1.0;
 const W_ARTERIAL: f32 = 1.9;
@@ -17,11 +20,11 @@ pub const TINT_VIEW: f32 = 110.0;
 pub const CAR_VIEW: f32 = 120.0;
 /// Hard cap on rendered cars at any zoom (the pool size).
 pub const MAX_CARS: usize = 420;
-const MAX_PER_EDGE: u32 = 7;
 const TINT_BUCKETS: usize = 8;
-/// Dots per real car on an edge (low demand still shows life) and visual speed in world units/s per u/min.
-const VIS_SCALE: f32 = 2.0;
-const VIS_SPEED: f32 = 0.5;
+/// Visual speed in world units per second per (unit/min of road speed): a 100-unit trip takes ~10-15 s.
+const VIS_SPEED: f32 = 1.5;
+/// Journeys started per second per simulated car trip/hour (a sample: the pool is capped anyway).
+const SAMPLE: f32 = 0.015;
 const Y_CAR: f32 = 0.62;
 const NEUTRAL: u8 = 255;
 
@@ -60,27 +63,43 @@ pub fn tint_colour(bucket: usize) -> Color {
     Color::srgb(a.0 + (r.0 - a.0) * k, a.1 + (r.1 - a.1) * k, a.2 + (r.2 - a.2) * k)
 }
 
-fn h01(e: usize, k: u32) -> f32 {
-    unit(hash3(0xCA, 0xD07, e as i64, k as i64)) as f32
+/// A car on its way: the route plus how far along segment `seg` it is.
+struct Journey {
+    trip: Trip,
+    seg: usize,
+    along: f32,
 }
 
-/// Cars to draw on an edge: vehicles on the link (Little's law q*t) scaled for visibility, stably rounded.
-pub fn cars_on_edge(flow_vph: f32, minutes: f32, e: usize) -> u32 {
-    let x = (flow_vph * minutes / 60.0 * VIS_SCALE).max(0.0);
-    let base = x.floor();
-    (base as u32 + (h01(e, 99) < x - base) as u32).min(MAX_PER_EDGE)
+#[derive(Resource)]
+struct Journeys {
+    cars: Vec<Journey>,
+    acc: f32,
+    rng: SplitMix64,
+    router: Router,
 }
 
-/// Position and heading of car `k` on edge a->b at time `t`. `congestion` = volume/capacity: cars slow and bunch
-/// toward their downstream end (the junction), so a saturated edge visibly queues.
-pub fn car_pose(a: Vec2, b: Vec2, e: usize, k: u32, t: f32, speed: f32, congestion: f32) -> (Vec2, Vec2) {
-    let len = a.distance(b).max(0.1);
-    let dir = if k % 2 == 0 { 1.0 } else { -1.0 };
-    let phase = (h01(e, k) + dir * t * speed / len).rem_euclid(1.0);
-    let pow = 1.0 + 2.5 * congestion.clamp(0.0, 2.0);
-    let u = if dir > 0.0 { 1.0 - (1.0 - phase).powf(pow) } else { phase.powf(pow) };
-    let d = (b - a) / len;
-    (a.lerp(b, u) + Vec2::new(-d.y, d.x) * 0.55 * dir, d * dir)
+/// Move a journey `dt` seconds along its route; `slow(edge)` = congestion slowdown. False once it has arrived.
+fn advance(j: &mut Journey, mut dt: f32, slow: impl Fn(usize) -> f32) -> bool {
+    while j.seg + 1 < j.trip.pts.len() {
+        let len = j.trip.pts[j.seg].distance(j.trip.pts[j.seg + 1]).max(1e-3);
+        let speed = j.trip.seg_speed[j.seg] * VIS_SPEED / slow(j.trip.seg_edge[j.seg]).max(1.0);
+        let left = (len - j.along) / speed;
+        if dt < left {
+            j.along += speed * dt;
+            return true;
+        }
+        dt -= left;
+        j.seg += 1;
+        j.along = 0.0;
+    }
+    false
+}
+
+/// Position and heading of a journey (driving on one side of the road).
+fn journey_pose(j: &Journey) -> (Vec2, Vec2) {
+    let (a, b) = (j.trip.pts[j.seg], j.trip.pts[j.seg + 1]);
+    let d = (b - a).normalize_or_zero();
+    (a + d * j.along + Vec2::new(-d.y, d.x) * 0.55, d)
 }
 
 pub struct RoadsPlugin;
@@ -133,6 +152,7 @@ fn spawn_roads(
         commands.spawn((CarDot(i), Mesh3d(car_mesh.clone()), MeshMaterial3d(car.clone()), Transform::from_xyz(0.0, Y_CAR, 0.0), Visibility::Hidden));
     }
     commands.insert_resource(m);
+    commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan) });
 }
 
 fn update_roads(
@@ -178,8 +198,8 @@ fn update_roads(
 fn drive_cars(
     time: Res<Time>,
     link: Res<GrowthLink>,
-    cp: Res<CityPlan>,
     cam: Option<Res<MapCam>>,
+    mut j: ResMut<Journeys>,
     mut was_on: Local<bool>,
     mut dots: Query<(&CarDot, &mut Transform, &mut Visibility)>,
 ) {
@@ -187,6 +207,7 @@ fn drive_cars(
     if !on {
         if *was_on {
             *was_on = false;
+            j.cars.clear();
             for (_, _, mut v) in &mut dots {
                 *v = Visibility::Hidden;
             }
@@ -194,40 +215,27 @@ fn drive_cars(
         return;
     }
     *was_on = true;
-    let (s, c) = (link.snapshots.latest(), cam.unwrap());
-    let half = c.view_h * 0.95 + 10.0;
-    // visible edges nearest the camera first, so the cap thins the periphery
-    let mut near: Vec<(f32, usize, u32)> = vec![];
-    for (e, ed) in cp.plan.graph.edges.iter().enumerate() {
-        if !s.built.get(e).copied().unwrap_or(false) {
-            continue;
-        }
-        let (a, b) = cp.plan.graph.pos(e);
-        let mid = (a + b) * 0.5;
-        if (mid - c.focus).abs().max_element() > half {
-            continue;
-        }
-        let speed = if ed.class == RoadClass::Arterial { SPEED_ARTERIAL } else { SPEED_LOCAL } as f32;
-        let slow = s.slow[e].max(1.0);
-        let n = cars_on_edge(s.flow[e], ed.len / speed * slow, e);
-        if n > 0 {
-            near.push((mid.distance(c.focus), e, n));
+    let s = link.snapshots.latest();
+    let dt = time.delta_secs().min(0.1);
+    let slow = |e: usize| s.slow.get(e).copied().unwrap_or(1.0);
+    j.cars.retain_mut(|c| advance(c, dt, slow));
+    j.acc = (j.acc + s.car_trips * SAMPLE * dt).min(6.0);
+    while j.acc >= 1.0 && j.cars.len() < MAX_CARS {
+        j.acc -= 1.0;
+        let j = &mut *j;
+        let Some((a, b)) = j.router.sample(&s.built, &s.pop, &s.zone_share, s.hour as f64, &mut j.rng) else { break };
+        if let Some(trip) = j.router.route(&s.built, &s.slow, a, b) {
+            j.cars.push(Journey { trip, seg: 0, along: 0.0 });
         }
     }
-    near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-    let slots: Vec<(usize, u32)> = near.iter().flat_map(|&(_, e, n)| (0..n).map(move |k| (e, k))).take(MAX_CARS).collect();
-    let t = time.elapsed_secs();
     for (d, mut tf, mut v) in &mut dots {
-        let Some(&(e, k)) = slots.get(d.0) else {
+        let Some(c) = j.cars.get(d.0) else {
             if *v != Visibility::Hidden {
                 *v = Visibility::Hidden;
             }
             continue;
         };
-        let ed = &cp.plan.graph.edges[e];
-        let (a, b) = cp.plan.graph.pos(e);
-        let speed = (if ed.class == RoadClass::Arterial { SPEED_ARTERIAL } else { SPEED_LOCAL }) as f32 * VIS_SPEED / s.slow[e].max(1.0);
-        let (p, h) = car_pose(a, b, e, k, t, speed, s.vc[e]);
+        let (p, h) = journey_pose(c);
         tf.translation = Vec3::new(p.x, Y_CAR, p.y);
         tf.rotation = Quat::from_rotation_y(-h.y.atan2(h.x));
         *v = Visibility::Inherited;
@@ -249,23 +257,36 @@ mod tests {
         assert!((0..TINT_BUCKETS).all(|k| { let c = tint_colour(k).to_srgba(); c.green <= c.red }), "no green tint");
     }
 
-    #[test]
-    fn fewer_cars_when_flow_drops_and_never_above_the_cap() {
-        let total = |q: f32| (0..200).map(|e| cars_on_edge(q, 1.0, e)).sum::<u32>();
-        assert!(total(150.0) > total(60.0) && total(60.0) > total(20.0), "{} {} {}", total(150.0), total(60.0), total(20.0));
-        assert_eq!(total(0.0), 0);
-        assert!((0..50).all(|e| cars_on_edge(1e6, 5.0, e) <= MAX_PER_EDGE));
+    fn journey(speed: f32) -> Journey {
+        let trip = Trip {
+            from: 0,
+            to: 1,
+            pts: vec![Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0)],
+            seg_edge: vec![0, 1],
+            seg_speed: vec![speed, speed],
+            nodes: vec![],
+            edges: vec![],
+        };
+        Journey { trip, seg: 0, along: 0.0 }
     }
 
     #[test]
-    fn cars_queue_toward_the_downstream_end_when_congested() {
-        let (a, b) = (Vec2::ZERO, Vec2::new(10.0, 0.0));
-        let mean_x = |cong: f32| {
-            let v: Vec<f32> = (0..40u32).step_by(2).map(|k| car_pose(a, b, 3, k, 1.0, 1.0, cong).0.x).collect();
-            v.iter().sum::<f32>() / v.len() as f32
-        };
-        assert!(mean_x(1.5) > mean_x(0.0) + 1.0, "{} vs {}", mean_x(1.5), mean_x(0.0));
-        let (p, h) = car_pose(a, b, 3, 1, 0.5, 1.0, 0.0); // odd cars drive the other way, in the other lane
-        assert!(h.x < 0.0 && p.y.abs() > 0.3);
+    fn a_car_drives_its_route_in_order_then_disappears() {
+        let mut j = journey(2.0); // 3 world units/s
+        assert!(advance(&mut j, 2.0, |_| 1.0));
+        assert_eq!(j.seg, 0);
+        assert!((journey_pose(&j).0.x - 6.0).abs() < 1e-4);
+        assert!(advance(&mut j, 2.0, |_| 1.0), "rounds the corner onto the next road");
+        assert_eq!(j.seg, 1);
+        assert!(journey_pose(&j).0.y > 1.0 && journey_pose(&j).1.y > 0.9);
+        assert!(!advance(&mut j, 10.0, |_| 1.0), "arrived: despawn");
+    }
+
+    #[test]
+    fn congestion_slows_a_car_down() {
+        let (mut free, mut jam) = (journey(2.0), journey(2.0));
+        advance(&mut free, 1.0, |_| 1.0);
+        advance(&mut jam, 1.0, |_| 3.0);
+        assert!((free.along - 3.0).abs() < 1e-4 && (jam.along - 1.0).abs() < 1e-4);
     }
 }
