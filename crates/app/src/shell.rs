@@ -3,11 +3,11 @@
 use crate::camera::MapCam;
 use crate::zones::ZoneLayout;
 use bevy::prelude::*;
-use economy::{Category, CurrentBudget, Economy, Scorecard, Scorecards, SpendCommand, SpendQueue};
+use economy::{Category, CurrentBudget, Economy, SpendCommand, SpendQueue};
 use sim_core::AgencyId;
 use sound::{SoundEvent, SoundKind};
 use std::collections::HashMap;
-use transit::{EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands, TransitShares};
+use transit::{EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands};
 use ui_tools::{octilinear, path_len, route, segment_transform, ActiveAgency, ToolAction, ToolCommand};
 
 /// The local player's agency (agency 0 is the city).
@@ -39,6 +39,13 @@ pub struct StationMap {
 impl StationMap {
     pub fn new(first_free: u32) -> Self {
         Self { next: first_free, by_cell: HashMap::new() }
+    }
+
+    /// Player stations as (transit node, cell), ascending node id (deterministic).
+    pub fn stations(&self) -> impl Iterator<Item = (NodeId, IVec2)> {
+        let mut v: Vec<(NodeId, IVec2)> = self.by_cell.iter().map(|(c, n)| (*n, *c)).collect();
+        v.sort_by_key(|s| s.0);
+        v.into_iter()
     }
 }
 
@@ -168,7 +175,7 @@ pub struct ShellPlugin;
 
 impl Plugin for ShellPlugin {
     fn build(&self, app: &mut App) {
-        let first_free = app.world().get_resource::<ZoneLayout>().map_or(0, |z| z.0.len() as u32);
+        let first_free = app.world().get_resource::<crate::zones::CityPlan>().map_or(0, |c| c.node_count());
         if let Some(mut e) = app.world_mut().get_resource_mut::<Economy>() {
             e.0.add_agency(PLAYER, 0.5);
         }
@@ -176,7 +183,7 @@ impl Plugin for ShellPlugin {
             .init_resource::<Lines>()
             .insert_resource(ActiveAgency(PLAYER))
             .add_systems(Startup, setup_visuals)
-            .add_systems(Update, (apply_tool_commands, move_trains, stub_metrics));
+            .add_systems(Update, (apply_tool_commands, move_trains));
     }
 }
 
@@ -298,17 +305,6 @@ fn move_trains(
             sound.write(SoundEvent { kind: SoundKind::TrainArrive, pitch: t.line as i32 * 2 + 1, pan });
         }
     }
-}
-
-/// Stand-in metrics until a real producer exists (cross-crate need): player scorecard from transit shares,
-/// car share as the complement.
-fn stub_metrics(shares: Res<TransitShares>, mut cards: ResMut<Scorecards>, mut car: ResMut<economy::CarShare>) {
-    if !shares.is_changed() || shares.0.is_empty() {
-        return;
-    }
-    let mean = shares.0.iter().sum::<f64>() / shares.0.len() as f64;
-    cards.0 = vec![(PLAYER, Scorecard { accessibility: mean, trip_time: mean, transit_share: mean, crowding: 0.8, emissions: mean, equity: mean })];
-    car.0 = (1.0 - mean).clamp(0.0, 1.0);
 }
 
 /// (budget, spent, standing, city road reserve) for the HUD chips.

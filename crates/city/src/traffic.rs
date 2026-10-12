@@ -13,8 +13,10 @@ pub const DAY_TICKS: u64 = 2400;
 pub const TRAFFIC_EVERY: u64 = 20;
 pub const SPEED_LOCAL: f64 = 4.0;
 pub const SPEED_ARTERIAL: f64 = 7.0;
-pub const CAP_LOCAL: f64 = 240.0;
-pub const CAP_ARTERIAL: f64 = 700.0;
+pub const CAP_LOCAL: f64 = 300.0;
+pub const CAP_ARTERIAL: f64 = 900.0;
+/// Gridlock floor: congestion never slows an edge by more than this factor.
+pub const MAX_SLOWDOWN: f64 = 6.0;
 const BPR_ALPHA: f64 = 1.0;
 const BPR_BETA: f64 = 4.0;
 const PARK_MIN: f64 = 3.0;
@@ -119,9 +121,9 @@ impl Traffic {
         }
     }
 
-    /// Congested travel time over edge `e` (minutes): free flow * (1 + a (q/c)^b).
+    /// Congested travel time over edge `e` (minutes): free flow * (1 + a (q/c)^b), capped at MAX_SLOWDOWN.
     pub fn edge_time(&self, e: usize) -> f64 {
-        self.t0[e] * (1.0 + BPR_ALPHA * (self.flow[e] / self.cap[e]).powf(BPR_BETA))
+        self.t0[e] * (1.0 + BPR_ALPHA * (self.flow[e] / self.cap[e]).powf(BPR_BETA)).min(MAX_SLOWDOWN)
     }
 
     /// Volume over capacity of edge `e`.
