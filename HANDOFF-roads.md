@@ -5,4 +5,5 @@ Done + pushed (workspace tests green on Mac before the main pull; rerun after):
 Not visually checked: all of the above; far-zoom stroke width (queue item) NOT checked.
 Also done: left-hand roundabouts (445d4f3), turn speed planning (c9d6987), preset junction spacing + ring-clear test (organic::junction_gap).
 Not visually checked: all of the above.
-NEXT: remaining B2 rows in docs/REQUIREMENTS.md queue (tools/queue list): road sizing LANE_W, one-lane tier, disconnected runtime stubs (extend organic test to growth ticks), opaque ring discs, far-zoom stroke check. Then SendMessage coordinator a3d7ddfbd62454335 once.
+Also done: ring discs thin opaque slabs (4f16003); junctions::merge_close (clearance discs never overlap / never swallow a road end) run in BOTH fresh-city paths (roadgen::gen_town merge->smooth->merge, organic::plan_preset), tests assert_clear over presets + plan_towns seeds.
+NEXT: queue row "Unify city generation" (Jai rule: seed + same growth step N times, presets = seed size + N; absorbs runtime-stub row) is the main next item. Then remaining B2 rows: LANE_W sizing, one-lane tier, far-zoom stroke check. Report to main chat (orchestrator out of context).

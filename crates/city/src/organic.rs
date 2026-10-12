@@ -149,6 +149,7 @@ pub fn plan_preset(seed: u64, core: Vec2, preset: Preset) -> TownPlan {
             made += 1;
         }
     }
+    crate::junctions::merge_close(&mut g.g, 0, 0, |e| crate::lanes::default_class(e.class));
     // houses: both sides of every edge, set back, in order out from the core; skip anything crowding a road/house
     let mut slots: Vec<(f32, Vec2, usize, f32)> = vec![];
     for (i, e) in g.g.edges.iter().enumerate() {
@@ -194,6 +195,28 @@ pub fn plan_preset(seed: u64, core: Vec2, preset: Preset) -> TownPlan {
 mod tests {
     use super::*;
 
+    /// No two junction clearance discs overlap, and no node other than a junction's own legs sits inside one.
+    pub fn assert_clear(g: &RoadGraph, what: &str) {
+        let inc = g.incident();
+        let cls = |e: usize| crate::lanes::default_class(g.edges[e].class);
+        let clr: Vec<f32> = (0..g.nodes.len()).map(|n| crate::junctions::clearance(g, &inc[n], n, cls)).collect();
+        for n in (0..g.nodes.len()).filter(|&n| clr[n] > 0.0) {
+            for m in 0..g.nodes.len() {
+                let adj = inc[n].iter().any(|&e| g.edges[e].a as usize == m || g.edges[e].b as usize == m);
+                let d = g.nodes[n].distance(g.nodes[m]);
+                assert!(m == n || (clr[m] == 0.0 && adj) || d >= clr[n] + clr[m], "{what}: node {m} {d} from junction {n} (clearance {} + {})", clr[n], clr[m]);
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_multi_town_cities_keep_junction_clearance() {
+        for seed in [1, 2, 3, 7, 42, 99] {
+            let regions = world_gen::generate_cities(seed, 3);
+            assert_clear(&crate::roadgen::plan_towns(seed, &regions[..2]).graph, &format!("plan_towns seed {seed}"));
+        }
+    }
+
     #[test]
     fn presets_are_connected_reachable_and_every_house_has_access() {
         for seed in [1, 7, 42] {
@@ -234,11 +257,7 @@ mod tests {
                         assert!(d >= gap - 0.01, "{p:?} seed {seed}: junctions {a},{b} only {d} apart");
                     }
                 }
-                for (i, r) in rings.iter().enumerate() {
-                    for q in &rings[i + 1..] {
-                        assert!(r.c.distance(q.c) > r.r + q.r + 2.0, "{p:?} seed {seed}: rings overlap");
-                    }
-                }
+                assert_clear(g, &format!("{p:?} seed {seed}"));
                 // junctions only where roads meet: no two edges cross
                 for i in 0..g.edges.len() {
                     for j in i + 1..g.edges.len() {

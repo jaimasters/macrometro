@@ -770,7 +770,11 @@ fn gen_town(seed: u64, region: &CityRegion, plan: &mut TownPlan) {
     // R31: generated roads keep their class's minimum radius; near-collinear through nodes merge onto the line
     let land_seed = gn.seed;
     let classes: Vec<crate::lanes::LaneClass> = gn.g.edges.iter().map(|e| crate::lanes::default_class(e.class)).collect();
+    // junction discs never overlap each other or swallow a road end: merge into one junction (before smoothing)
+    crate::junctions::merge_close(gn.g, n0, e0, |e| crate::lanes::default_class(e.class));
+    let classes: Vec<crate::lanes::LaneClass> = gn.g.edges.iter().map(|e| crate::lanes::default_class(e.class)).collect();
     crate::junctions::smooth(gn.g, |e| classes[e], |p| is_land(land_seed, p));
+    crate::junctions::merge_close(gn.g, n0, e0, |e| crate::lanes::default_class(e.class)); // smoothing can pull two together
 
     // parcels both sides of every edge, clear of other roads and water, thinning with distance
     let g = &*gn.g;

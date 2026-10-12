@@ -75,6 +75,54 @@ pub enum Junction {
     Overpass,
 }
 
+/// Radius of the disc a junction occupies (its drawn ring plus a kerb), or 0 for a through node / dead end.
+pub fn clearance(g: &RoadGraph, inc: &[usize], n: usize, class: impl Fn(usize) -> LaneClass) -> f32 {
+    Ring::at(g, inc, n, class).map_or(0.0, |r| r.r + 1.0)
+}
+
+/// Generation-time fix-up: while a junction's clearance disc overlaps another junction's disc or holds a node that is
+/// not its own leg (a road ending or passing inside it), merge that node into the junction (one junction, never two
+/// rings on top of each other). Only nodes >= `n0` and edges >= `e0` (the town being generated) are touched, and the
+/// higher index is always the one removed, so `n0` (the town core) survives.
+pub fn merge_close(g: &mut RoadGraph, n0: usize, e0: usize, class: impl Fn(&crate::roadgen::REdge) -> LaneClass) {
+    for _ in 0..500 {
+        let inc = g.incident();
+        let cls = |e: usize| class(&g.edges[e]);
+        let clr: Vec<f32> = (0..g.nodes.len()).map(|n| if n < n0 { 0.0 } else { clearance(g, &inc[n], n, cls) }).collect();
+        let adj = |n: usize, m: usize| inc[n].iter().any(|&e| g.edges[e].a as usize == m || g.edges[e].b as usize == m);
+        let hit = (n0..g.nodes.len()).filter(|&n| clr[n] > 0.0).find_map(|n| {
+            (n0..g.nodes.len()).find(|&m| {
+                m != n && g.nodes[n].distance(g.nodes[m]) < clr[n] + clr[m] && (clr[m] > 0.0 || !adj(n, m))
+            }).map(|m| (n.min(m), n.max(m)))
+        });
+        let Some((keep, gone)) = hit else { return };
+        if clr[gone] > 0.0 && clr[keep] > 0.0 {
+            g.nodes[keep] = (g.nodes[keep] + g.nodes[gone]) / 2.0;
+        }
+        let (k, d) = (keep as u32, gone as u32);
+        let mut seen = std::collections::HashSet::new();
+        let mut i = 0;
+        g.edges.retain_mut(|e| {
+            i += 1;
+            for x in [&mut e.a, &mut e.b] {
+                if *x == d {
+                    *x = k;
+                }
+            }
+            i - 1 < e0 || (e.a != e.b && seen.insert((e.a.min(e.b), e.a.max(e.b))))
+        });
+        g.nodes.remove(gone);
+        for e in &mut g.edges {
+            for x in [&mut e.a, &mut e.b] {
+                if *x > d {
+                    *x -= 1;
+                }
+            }
+            e.len = g.nodes[e.a as usize].distance(g.nodes[e.b as usize]);
+        }
+    }
+}
+
 /// What node `n` with these incident road classes becomes.
 pub fn junction(classes: &[LaneClass]) -> Junction {
     if classes.iter().any(|&c| is_freeway(c)) && classes.len() >= 3 {
