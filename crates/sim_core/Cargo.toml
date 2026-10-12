@@ -1,0 +1,8 @@
+[package]
+name = "sim_core"
+version = "0.1.0"
+edition.workspace = true
+description = "Fixed-step simulation clock on worker threads and snapshot handoff to render."
+
+[dependencies]
+bevy.workspace = true

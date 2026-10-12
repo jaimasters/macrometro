@@ -1,0 +1,8 @@
+[package]
+name = "transit"
+version = "0.1.0"
+edition.workspace = true
+description = "Rail and road networks; lines with specialisation attributes."
+
+[dependencies]
+bevy.workspace = true

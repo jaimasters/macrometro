@@ -1,0 +1,8 @@
+[package]
+name = "ui_tools"
+version = "0.1.0"
+edition.workspace = true
+description = "Player tools: line drawing, station placement, macro line policies, micro edits."
+
+[dependencies]
+bevy.workspace = true

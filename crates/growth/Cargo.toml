@@ -1,0 +1,8 @@
+[package]
+name = "growth"
+version = "0.1.0"
+edition.workspace = true
+description = "Zone-level demand, reachability-driven growth and sprawl."
+
+[dependencies]
+bevy.workspace = true

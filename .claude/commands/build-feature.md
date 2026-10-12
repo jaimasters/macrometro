@@ -1,0 +1,1 @@
+Build next task in docs/features/$ARGUMENTS/STATUS.md. Read only INDEX + that feature's docs. Write failing test first, then code, in crates/$ARGUMENTS only. Delegate per docs/AGENTS.md (haiku workers, narrow scope). Update STATUS.md (done/next) and DECISIONS.md. Acceptance: `cargo test -p $ARGUMENTS` green.

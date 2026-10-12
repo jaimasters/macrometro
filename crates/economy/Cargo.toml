@@ -1,0 +1,8 @@
+[package]
+name = "economy"
+version = "0.1.0"
+edition.workspace = true
+description = "Money, land value, greenfield vs compulsory-acquisition costs."
+
+[dependencies]
+bevy.workspace = true
