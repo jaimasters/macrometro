@@ -146,6 +146,8 @@ pub struct TrainSim {
     /// Ticks each road edge spent closed by a train on a level crossing, and the ticks counted, since the last `take_closure`.
     closed: BTreeMap<u32, u64>,
     counted: u64,
+    /// Single-track segments claimed this tick by a departing train: edge -> (travelling a->b, train id).
+    claims: BTreeMap<usize, (bool, u32)>,
 }
 
 impl TrainSim {
@@ -202,6 +204,7 @@ impl TrainSim {
         self.sync(net);
         self.tick += 1;
         self.counted += 1;
+        self.claims.clear();
         let snap = self.trains.clone();
         let mut trains = std::mem::take(&mut self.trains);
         for t in trains.iter_mut() {
@@ -327,12 +330,45 @@ impl TrainSim {
         snap.iter().filter(|o| o.id != t.id).all(|o| self.leader(net, std::slice::from_ref(&tc), o).map_or(true, |(g, _)| g >= safe(o.v)))
     }
 
+    /// The segment a train in Dwell will enter next: (edge, travelling a->b).
+    fn next_seg(&self, t: &Train) -> (usize, bool) {
+        let r = &self.routes[t.route];
+        let n = r.edges.len();
+        let (dir, k) = if t.k < n { (t.dir, t.k + 1) } else if r.looped { (t.dir, 1) } else { (-t.dir, 1) };
+        let s = &r.tsegs[Route::d(dir)][k - 1];
+        (s.edge, s.fwd)
+    }
+
+    /// Single-track token: may `t` enter `edge` heading `fwd`? Not while a train heads the other way on it, or one
+    /// claimed it this tick.
+    fn single_track_free(&self, net: &Network, snap: &[Train], t: &Train, edge: usize, fwd: bool) -> bool {
+        if !net.edges[edge].bidir {
+            return true;
+        }
+        if self.claims.get(&edge).is_some_and(|(f, id)| *f != fwd && *id != t.id) {
+            return false;
+        }
+        !snap.iter().any(|o| {
+            o.id != t.id && o.phase == Phase::Run && {
+                let s = &self.routes[o.route].tsegs[Route::d(o.dir)][o.k - 1];
+                s.edge == edge && s.fwd != fwd
+            }
+        })
+    }
+
     fn update(&mut self, net: &Network, snap: &[Train], t: &mut Train) {
         let tt = train_type(self.routes[t.route].class);
         if let Phase::Dwell(left) = t.phase {
             if left > 1 {
                 t.phase = Phase::Dwell(left - 1);
                 return;
+            }
+            let (edge, fwd) = self.next_seg(t);
+            if !self.single_track_free(net, snap, t, edge, fwd) {
+                return; // hold on the platform until the single track ahead is clear
+            }
+            if net.edges[edge].bidir {
+                self.claims.insert(edge, (fwd, t.id));
             }
             let (looped, n) = (self.routes[t.route].looped, self.routes[t.route].edges.len());
             if t.k < n {

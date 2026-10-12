@@ -75,6 +75,9 @@ pub struct Edge {
     /// Speed limit on this segment (curves, level crossings); INFINITY = none.
     pub vcap: f64,
     pub crossings: Vec<Crossing>,
+    /// One track used in both directions (single-track running with passing loops at stations). Cleared when a
+    /// second track is added. `tracks == 1` without this is a one-way loop track.
+    pub bidir: bool,
 }
 
 /// Price of laying one more track per unit length.
@@ -91,7 +94,7 @@ impl Edge {
     }
 
     pub fn new(a: NodeId, b: NodeId, len: f64, kind: EdgeKind, owner: AgencyId) -> Self {
-        Self { a, b, len, kind, owner, tracks: 2, vcap: f64::INFINITY, crossings: vec![] }
+        Self { a, b, len, kind, owner, tracks: 2, vcap: f64::INFINITY, crossings: vec![], bidir: false }
     }
 }
 
@@ -156,6 +159,8 @@ pub enum TransitAction {
     AddPlatform(NodeId),
     /// A rail edge with explicit track count (1 = one-way a->b), speed cap and crossings.
     AddRail { a: NodeId, b: NodeId, len: f64, tracks: u8, vcap: f64, crossings: Vec<Crossing> },
+    /// Single bidirectional track between two stations (the default for new lines).
+    AddSingleRail { a: NodeId, b: NodeId, len: f64, vcap: f64, crossings: Vec<Crossing> },
     /// The rail edge between two stations: 1 -> 2 -> 4 tracks.
     UpgradeTracks { a: NodeId, b: NodeId },
     /// Replace a crossing's kind (level -> bridge/underpass).
@@ -220,7 +225,7 @@ impl Network {
     /// A hop over a 1-track edge must follow its a->b direction and belong to a loop line.
     fn check_hop(&self, i: usize, from: NodeId, to: NodeId, looped: bool) -> Result<(), TransitError> {
         let e = &self.edges[i];
-        if e.tracks > 1 {
+        if e.tracks > 1 || e.bidir {
             return Ok(());
         }
         if !looped {
@@ -327,6 +332,17 @@ impl Network {
                 self.edges.push(e);
                 Ok(Applied::Edge(self.edges.len() - 1))
             }
+            TransitAction::AddSingleRail { a, b, len, vcap, crossings } => {
+                self.check(*a)?;
+                self.check(*b)?;
+                if !len.is_finite() || *len <= 0.0 {
+                    return Err(TransitError::BadLength);
+                }
+                let mut e = Edge::new(*a, *b, *len, EdgeKind::Rail, c.agency);
+                (e.tracks, e.vcap, e.crossings, e.bidir) = (1, *vcap, crossings.clone(), true);
+                self.edges.push(e);
+                Ok(Applied::Edge(self.edges.len() - 1))
+            }
             TransitAction::UpgradeTracks { a, b } => {
                 let i = self.rail_edge(*a, *b).ok_or(TransitError::NoRailEdge(*a, *b))?;
                 let e = &mut self.edges[i];
@@ -334,6 +350,7 @@ impl Network {
                     return Err(TransitError::MaxTracks(i));
                 }
                 e.tracks *= 2;
+                e.bidir = false;
                 Ok(Applied::Edge(i))
             }
             TransitAction::UpgradeCrossing { edge, idx, kind } => {

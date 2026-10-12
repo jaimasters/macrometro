@@ -267,3 +267,37 @@ fn a_fast_train_overtakes_a_slow_one_only_on_four_tracks() {
     assert_eq!(f4, Some(LineId(1)), "4 tracks: the express overtakes");
     assert!(g2 >= 0.0 && g4 >= 0.0, "overlap: {g2} {g4}");
 }
+
+#[test]
+fn opposing_trains_share_a_single_track_and_meet_at_station_loops_without_deadlock() {
+    let mut net = Network::new(NetParams::default());
+    for _ in 0..3 {
+        net.apply(&cmd(TransitAction::AddNode)).unwrap();
+    }
+    for i in 0..2 {
+        net.apply(&cmd(TransitAction::AddSingleRail { a: NodeId(i), b: NodeId(i + 1), len: 150.0, vcap: f64::INFINITY, crossings: vec![] })).unwrap();
+    }
+    for n in 0..3 {
+        net.apply(&cmd(TransitAction::AddPlatform(NodeId(n)))).unwrap(); // island: two platform tracks
+    }
+    net.apply(&cmd(TransitAction::AddLine { class: RailClass::LightRail, stops: (0..3).map(NodeId).collect(), alignment_mismatch: 0.0 })).unwrap();
+    let mut s = TrainSim::default();
+    let (mut went_back, mut reached_end) = (false, false);
+    for _ in 0..(900.0 / DT) as u64 {
+        s.step(&net);
+        for t in &s.trains {
+            went_back |= t.dir < 0;
+            reached_end |= t.dir < 0 && t.k >= 2;
+        }
+        // never two opposing trains moving on the same single-track edge
+        for a in &s.trains {
+            for b in &s.trains {
+                if a.id < b.id && a.dir != b.dir && a.phase == Phase::Run && b.phase == Phase::Run && a.v > 0.0 && b.v > 0.0 {
+                    assert_ne!(s.edge_under(a), s.edge_under(b), "head-on at tick {}", s.tick);
+                }
+            }
+        }
+    }
+    assert!(s.trains.len() >= 2, "several trains share the line");
+    assert!(went_back && reached_end, "trains complete the out-and-back run: no deadlock");
+}

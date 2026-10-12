@@ -238,7 +238,7 @@ fn rail_for(hops: &Hops, c: (IVec2, IVec2), a: NodeId, b: NodeId, agency: Agency
         Some(Some(h)) => {
             // crossings were measured from `h.from`; flip them if this line runs the other way
             let crossings = h.crossings.iter().map(|x| if h.from == c.0 { *x } else { Crossing { at: h.len - x.at, ..*x } }).collect();
-            Some(TransitCommand { agency, action: TransitAction::AddRail { a, b, len: h.len, tracks: 2, vcap: h.vcap, crossings } })
+            Some(TransitCommand { agency, action: TransitAction::AddSingleRail { a, b, len: h.len, vcap: h.vcap, crossings } })
         }
     }
 }
@@ -267,6 +267,8 @@ pub fn to_transit_with(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]
         map.by_cell.insert(cell, n);
         fresh.push(cell);
         out.push(TransitCommand { agency, action: TransitAction::AddNode });
+        // island platform by default: two platform tracks, so each station is a passing loop
+        out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
         let p = cell.as_vec2();
         if let Some(z) = nearest_zone(centres, p) {
             let len = centres[z].distance(p).max(1.0) as f64;
@@ -647,9 +649,9 @@ mod tests {
         let c = cmd(7, ToolAction::PlaceStation { cell: IVec2::new(90, 0) });
         let (v, fresh) = to_transit(&c, &mut m, &centres);
         assert_eq!(fresh, vec![IVec2::new(90, 0)]);
-        assert_eq!(v.len(), 2);
+        assert_eq!(v.len(), 3, "node, island platform, road link");
         assert!(v.iter().all(|t| t.agency == AgencyId(7)));
-        assert_eq!(v[1].action, TransitAction::AddEdge { a: NodeId(2), b: NodeId(1), len: 10.0, kind: EdgeKind::Road });
+        assert_eq!(v[2].action, TransitAction::AddEdge { a: NodeId(2), b: NodeId(1), len: 10.0, kind: EdgeKind::Road });
         let (again, fresh) = to_transit(&c, &mut m, &centres);
         assert!(again.is_empty() && fresh.is_empty());
     }
@@ -770,5 +772,30 @@ mod tests {
         // laid track (no crossings) gains it; a second pass adds nothing
         let all = merge_crossings(&[], &found).unwrap();
         assert!(merge_crossings(&all, &found).is_none());
+    }
+
+    #[test]
+    fn new_lines_default_to_single_track_and_stations_to_island_platforms() {
+        let centres = [Vec2::ZERO];
+        let mut m = StationMap::new(1);
+        let (a, b) = (IVec2::new(0, 12), IVec2::new(40, 12));
+        let mut net = transit::Network::default();
+        net.apply(&TransitCommand { agency: AgencyId(0), action: TransitAction::AddNode }).unwrap();
+        for t in to_transit_with(&cmd(1, ToolAction::DrawLine { cells: vec![a, b] }), &mut m, &centres, &Hops::new()).0 {
+            net.apply(&t).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        // no placer plan -> the straight fallback edge is a plain AddEdge; with a plan it is a single bidirectional rail
+        let mut hops = Hops::new();
+        hops.insert(hop_key(IVec2::new(0, 12), IVec2::new(80, 12)), Some(HopPlan { from: IVec2::new(0, 12), len: 80.0, vcap: f64::INFINITY, crossings: vec![] }));
+        let c = IVec2::new(80, 12);
+        for t in to_transit_with(&cmd(1, ToolAction::DrawLine { cells: vec![a, c] }), &mut m, &centres, &hops).0 {
+            net.apply(&t).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        let e = net.edges.iter().find(|e| e.kind == EdgeKind::Rail && e.len == 80.0).unwrap();
+        assert!(e.tracks == 1 && e.bidir, "single track, both directions");
+        assert_eq!(net.platform_count(m.node(a).unwrap()), 2, "island platform: two platform tracks");
+        let i = net.rail_edge(m.node(a).unwrap(), m.node(c).unwrap()).unwrap();
+        net.apply(&TransitCommand { agency: AgencyId(1), action: TransitAction::UpgradeTracks { a: m.node(a).unwrap(), b: m.node(c).unwrap() } }).unwrap();
+        assert!(net.edges[i].tracks == 2 && !net.edges[i].bidir, "+Track makes it a double track");
     }
 }

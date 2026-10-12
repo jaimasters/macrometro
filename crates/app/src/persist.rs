@@ -327,12 +327,14 @@ fn restore_game(
         }
     }
     for (c, n) in &g.platforms {
-        for _ in 1..*n {
+        // new stations start as islands (2 platforms); replay only the extras
+        for _ in 2..*n {
             run(ToolAction::AddPlatform { cell: cell(c) }, &mut tc, &mut map);
         }
     }
     for (a, b, t) in &g.tracks {
-        if *t >= 4 {
+        // rails restore as single track; older saves (2 or 4 tracks) are widened back
+        for _ in 0..(*t / 2).min(2) {
             run(ToolAction::UpgradeTracks { a: cell(a), b: cell(b) }, &mut tc, &mut map);
         }
     }
@@ -583,6 +585,7 @@ mod tests {
             ToolAction::DrawLine { cells: cells.clone() },
             ToolAction::AddPlatform { cell: cells[0] },
             ToolAction::UpgradeTracks { a: cells[0], b: cells[1] },
+            ToolAction::UpgradeTracks { a: cells[0], b: cells[1] },
         ] {
             a.world_mut().write_message(ToolCommand { agency: PLAYER, action });
             a.update();
@@ -595,7 +598,7 @@ mod tests {
         *a.world().resource::<GrowthLink>().shared.save.lock().unwrap() = Some(growth);
         let saved = collect(&mut a);
         assert_eq!(saved.stations, cells.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>());
-        assert_eq!(saved.platforms[0], ((cells[0].x, cells[0].y), 2));
+        assert_eq!(saved.platforms[0], ((cells[0].x, cells[0].y), 3));
         assert!(saved.tracks.iter().any(|t| t.2 == 4), "{:?}", saved.tracks);
         assert!(saved.agencies.iter().any(|g| g.id == PLAYER.0 && !g.spend.is_empty()));
 
