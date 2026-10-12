@@ -1,5 +1,6 @@
 //! Player tools: line drawing, station placement, macro line policies, micro edits.
 //! Spec: docs/features/ui_tools/SPEC.md. Pure logic in `core`; this file is the bevy plugin.
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -20,13 +21,23 @@ impl Default for GroundHeight {
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct ActiveAgency(pub AgencyId);
 
+/// World (x,z) under the cursor this frame, if over the map and not over UI. Written by `pointer`.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct CursorWorld(pub Option<Vec2>);
+
 /// Marker on spawned road-plan ghost meshes.
 #[derive(Component)]
 pub struct RoadGhost;
 
-/// Ghost road width / thickness in world units.
-const GHOST_WIDTH: f32 = 3.0;
+/// Marker on the live line-drag preview meshes.
+#[derive(Component)]
+pub struct DragPreview;
+
+const GHOST_WIDTH: f32 = 1.6;
 const GHOST_THICKNESS: f32 = 0.3;
+/// Heights (world y) for flat layering, bottom to top. Shared with the app so layers never z-fight.
+pub const Y_GHOST: f32 = 0.5;
+pub const Y_PREVIEW: f32 = 2.6;
 
 pub struct UiToolsPlugin;
 
@@ -34,61 +45,123 @@ impl Plugin for UiToolsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveTool>()
             .init_resource::<ActiveAgency>()
-            .init_resource::<LineDraft>()
+            .init_resource::<LineDrag>()
+            .init_resource::<Stations>()
+            .init_resource::<CursorWorld>()
             .init_resource::<GroundHeight>()
             .add_message::<ToolCommand>()
             .add_message::<GhostRoads>()
-            .add_systems(Update, (select_tool, finish_line_key, click_tool, spawn_road_ghosts).chain());
+            .add_systems(Update, (select_tool, pointer, draw_preview, spawn_road_ghosts).chain());
     }
 }
 
-fn select_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<ActiveTool>, mut draft: ResMut<LineDraft>) {
+fn select_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<ActiveTool>, mut drag: ResMut<LineDrag>) {
     let next = if keys.just_pressed(KeyCode::Digit1) {
-        ActiveTool::PlaceStation
+        ActiveTool::Pan
     } else if keys.just_pressed(KeyCode::Digit2) {
+        ActiveTool::PlaceStation
+    } else if keys.just_pressed(KeyCode::Digit3) {
         ActiveTool::DrawLine
-    } else if keys.just_pressed(KeyCode::Escape) {
-        ActiveTool::None
     } else {
         return;
     };
     *tool = next;
-    draft.0.clear();
+    drag.from = None;
 }
 
-fn finish_line_key(
-    keys: Res<ButtonInput<KeyCode>>,
-    agency: Res<ActiveAgency>,
-    mut draft: ResMut<LineDraft>,
-    mut out: MessageWriter<ToolCommand>,
-) {
-    if keys.just_pressed(KeyCode::Enter) {
-        if let Some(c) = finish_line(agency.0, &mut draft) {
-            out.write(c);
-        }
-    }
-}
-
-fn click_tool(
+/// Left button: PlaceStation clicks, DrawLine press-drag-release. Pan is handled by the camera.
+#[allow(clippy::too_many_arguments)]
+fn pointer(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform)>>,
     tool: Res<ActiveTool>,
     agency: Res<ActiveAgency>,
     ground: Res<GroundHeight>,
-    mut draft: ResMut<LineDraft>,
+    ui: Query<&Hovered>,
+    mut cursor_world: ResMut<CursorWorld>,
+    mut stations: ResMut<Stations>,
+    mut drag: ResMut<LineDrag>,
     mut out: MessageWriter<ToolCommand>,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) || *tool == ActiveTool::None {
+    let over_ui = ui.iter().any(|h| h.get());
+    cursor_world.0 = None;
+    if let (Some(window), Some(camera)) = (window, camera) {
+        let (camera, cam_tf) = *camera;
+        cursor_world.0 = window
+            .cursor_position()
+            .and_then(|c| camera.viewport_to_world(cam_tf, c).ok())
+            .and_then(|ray| ray_terrain(ray.origin, *ray.direction, &*ground.0))
+            .filter(|_| !over_ui);
+    }
+    let hit = cursor_world.0;
+    if mouse.just_pressed(MouseButton::Left) {
+        if let Some(p) = hit {
+            match *tool {
+                ActiveTool::Pan => {}
+                ActiveTool::PlaceStation => {
+                    let cell = snap_station(&stations.0, p);
+                    if !stations.0.contains(&cell) {
+                        stations.0.push(cell);
+                        out.write(ToolCommand { agency: agency.0, action: ToolAction::PlaceStation { cell } });
+                    }
+                }
+                ActiveTool::DrawLine => {
+                    let from = snap_station(&stations.0, p);
+                    *drag = LineDrag { from: Some(from), to: from };
+                }
+            }
+        }
+    }
+    if let (Some(_), Some(p)) = (drag.from, hit) {
+        let to = snap_station(&stations.0, p);
+        if drag.to != to {
+            drag.to = to;
+        }
+    }
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(from) = drag.from.take() {
+            if let Some(c) = finish_drag(&mut stations, agency.0, from, drag.to) {
+                out.write(c);
+            }
+        }
+    }
+}
+
+/// Live preview of the line being dragged: translucent octilinear strokes.
+fn draw_preview(
+    drag: Res<LineDrag>,
+    old: Query<Entity, With<DragPreview>>,
+    mut mat: Local<Option<Handle<StandardMaterial>>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !drag.is_changed() {
         return;
     }
-    let (Some(window), Some(camera)) = (window, camera) else { return };
-    let (camera, cam_tf) = *camera;
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
-    let Some(hit) = ray_terrain(ray.origin, *ray.direction, &*ground.0) else { return };
-    if let Some(c) = click_action(*tool, agency.0, &mut draft, snap(hit)) {
-        out.write(c);
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    let Some(from) = drag.from.filter(|f| *f != drag.to) else { return };
+    let mat = mat
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgba(0.15, 0.45, 0.90, 0.55),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            })
+        })
+        .clone();
+    let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    for w in route(&[from, drag.to]).windows(2) {
+        commands.spawn((
+            DragPreview,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mat.clone()),
+            segment_transform(w[0], w[1], Y_PREVIEW, 3.0, 0.3),
+        ));
     }
 }
 
@@ -96,7 +169,6 @@ fn click_tool(
 fn spawn_road_ghosts(
     mut plans: MessageReader<GhostRoads>,
     old: Query<Entity, With<RoadGhost>>,
-    ground: Res<GroundHeight>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -107,19 +179,17 @@ fn spawn_road_ghosts(
     }
     let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.9, 0.9, 0.7, 0.22),
+        base_color: Color::srgba(0.25, 0.25, 0.30, 0.10),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         ..default()
     });
     for &(a, b) in &plan.segments {
-        let m = (a + b) * 0.5;
-        let y = (ground.0)(m.x, m.y) + 0.4;
         commands.spawn((
             RoadGhost,
             Mesh3d(mesh.clone()),
             MeshMaterial3d(mat.clone()),
-            segment_transform(a, b, y, GHOST_WIDTH, GHOST_THICKNESS),
+            segment_transform(a, b, Y_GHOST, GHOST_WIDTH, GHOST_THICKNESS),
         ));
     }
 }
@@ -140,19 +210,23 @@ mod plugin_tests {
     }
 
     #[test]
-    fn keys_select_tool_and_enter_emits_line() {
+    fn number_keys_select_tool() {
         let mut app = app();
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Digit2);
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Digit3);
         app.update();
         assert_eq!(*app.world().resource::<ActiveTool>(), ActiveTool::DrawLine);
-        app.world_mut().resource_mut::<LineDraft>().0 = vec![IVec2::ZERO, IVec2::new(5, 5)];
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Enter);
+    }
+
+    #[test]
+    fn drag_preview_spawns_and_clears() {
+        let mut app = app();
+        *app.world_mut().resource_mut::<LineDrag>() = LineDrag { from: Some(IVec2::ZERO), to: IVec2::new(40, 12) };
         app.update();
-        let msgs = app.world().resource::<Messages<ToolCommand>>();
-        let got: Vec<_> = msgs.iter_current_update_messages().collect();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].agency, AgencyId(0));
+        let count = |app: &mut App| app.world_mut().query::<&DragPreview>().iter(app.world()).count();
+        assert_eq!(count(&mut app), 2); // one bend -> two strokes
+        app.world_mut().resource_mut::<LineDrag>().from = None;
+        app.update();
+        assert_eq!(count(&mut app), 0);
     }
 
     #[test]

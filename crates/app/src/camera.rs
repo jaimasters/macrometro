@@ -1,97 +1,113 @@
-//! Orbit / pan / zoom camera. Right-drag orbits, middle-drag or WASD pans, wheel zooms. Left click is left to tools.
+//! Straight-down orthographic map camera: drag to pan, scroll to zoom (ortho scale). No tilt, no orbit.
 use crate::terrain::StreamFocus;
+use bevy::camera::ScalingMode;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+use ui_tools::ActiveTool;
 
+/// Camera state: `focus` is the world (x,z) at screen centre, `view_h` the world height shown on screen.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
-pub struct OrbitCam {
-    pub focus: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub dist: f32,
+pub struct MapCam {
+    pub focus: Vec2,
+    pub view_h: f32,
 }
 
-pub const MIN_DIST: f32 = 15.0;
-pub const MAX_DIST: f32 = 600.0;
-const MIN_PITCH: f32 = 0.15;
-const MAX_PITCH: f32 = 1.5;
+pub const MIN_VIEW: f32 = 40.0;
+pub const MAX_VIEW: f32 = 420.0;
+const HEIGHT: f32 = 500.0;
 
-impl OrbitCam {
-    pub fn looking_at(focus: Vec3) -> Self {
-        Self { focus, yaw: 0.6, pitch: 0.9, dist: 160.0 }
+impl MapCam {
+    /// Frame a square region of `extent` world units around `focus` with 25% margin.
+    pub fn framing(focus: Vec2, extent: f32) -> Self {
+        Self { focus, view_h: (extent * 1.25).clamp(MIN_VIEW, MAX_VIEW) }
     }
 
-    pub fn eye(&self) -> Vec3 {
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        self.focus + Vec3::new(sy * cp, sp, cy * cp) * self.dist
+    /// Move the focus so the map follows a cursor drag of `d` pixels (screen y grows downward = world +z).
+    pub fn drag(&mut self, d: Vec2, window_h: f32) {
+        self.focus -= d * (self.view_h / window_h.max(1.0));
     }
 
-    pub fn orbit(&mut self, d: Vec2) {
-        self.yaw -= d.x * 0.005;
-        self.pitch = (self.pitch + d.y * 0.005).clamp(MIN_PITCH, MAX_PITCH);
-    }
-
-    /// Pan on the ground plane in camera-yaw space; speed scales with distance.
-    pub fn pan(&mut self, right: f32, forward: f32) {
-        let (sy, cy) = self.yaw.sin_cos();
-        let fwd = Vec3::new(-sy, 0.0, -cy);
-        let rgt = Vec3::new(cy, 0.0, -sy);
-        self.focus += (rgt * right + fwd * forward) * self.dist * 0.01;
-    }
-
+    /// Zoom about the screen centre; positive lines zoom in.
     pub fn zoom(&mut self, lines: f32) {
-        self.dist = (self.dist * (1.0 - lines * 0.1)).clamp(MIN_DIST, MAX_DIST);
+        self.view_h = (self.view_h * (1.0 - lines * 0.1)).clamp(MIN_VIEW, MAX_VIEW);
+    }
+
+    /// Terrain chunks needed to cover the view (assumes up to ~2:1 windows).
+    pub fn chunk_radius(&self) -> i64 {
+        (self.view_h / 32.0).ceil() as i64 + 1
     }
 }
 
-pub struct OrbitCameraPlugin;
+pub struct MapCameraPlugin;
 
-impl Plugin for OrbitCameraPlugin {
+impl Plugin for MapCameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_camera).add_systems(Update, drive_camera);
     }
 }
 
-fn spawn_camera(mut commands: Commands, cam: Option<Res<OrbitCam>>) {
-    let c = cam.map(|c| *c).unwrap_or(OrbitCam::looking_at(Vec3::ZERO));
+fn spawn_camera(mut commands: Commands, cam: Option<Res<MapCam>>) {
+    let c = cam.map(|c| *c).unwrap_or(MapCam { focus: Vec2::ZERO, view_h: 200.0 });
     commands.insert_resource(c);
-    commands.spawn((Camera3d::default(), Transform::from_translation(c.eye()).looking_at(c.focus, Vec3::Y)));
     commands.spawn((
-        DirectionalLight { illuminance: 9_000.0, ..default() },
-        Transform::from_xyz(0.4, 1.0, 0.3).looking_at(Vec3::ZERO, Vec3::Y),
+        Camera3d::default(),
+        Tonemapping::None, // flat map colours must render as authored
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::FixedVertical { viewport_height: c.view_h },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(c.focus.x, HEIGHT, c.focus.y).looking_at(Vec3::new(c.focus.x, 0.0, c.focus.y), Vec3::NEG_Z),
     ));
-    commands.insert_resource(GlobalAmbientLight { brightness: 350.0, ..default() });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drive_camera(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
-    mut cam: ResMut<OrbitCam>,
+    tool: Res<ActiveTool>,
+    ui: Query<&Hovered>,
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
+    mut cam: ResMut<MapCam>,
     mut focus: ResMut<StreamFocus>,
-    mut q: Query<&mut Transform, With<Camera3d>>,
+    mut q: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
-    let axis = |neg: &[KeyCode], pos: &[KeyCode]| keys.any_pressed(pos.iter().copied()) as i32 as f32 - keys.any_pressed(neg.iter().copied()) as i32 as f32;
-    let (r, f) = (axis(&[KeyCode::KeyA, KeyCode::ArrowLeft], &[KeyCode::KeyD, KeyCode::ArrowRight]), axis(&[KeyCode::KeyS, KeyCode::ArrowDown], &[KeyCode::KeyW, KeyCode::ArrowUp]));
-    cam.pan(r * 0.5, f * 0.5);
-    if mouse.pressed(MouseButton::Right) {
-        cam.orbit(motion.delta);
-    }
-    if mouse.pressed(MouseButton::Middle) {
-        cam.pan(-motion.delta.x * 0.1, motion.delta.y * 0.1);
+    let over_ui = ui.iter().any(|h| h.get());
+    let h = window.map_or(720.0, |w| w.height());
+    let axis = |neg: &[KeyCode], pos: &[KeyCode]| {
+        keys.any_pressed(pos.iter().copied()) as i32 as f32 - keys.any_pressed(neg.iter().copied()) as i32 as f32
+    };
+    let (r, f) = (
+        axis(&[KeyCode::KeyA, KeyCode::ArrowLeft], &[KeyCode::KeyD, KeyCode::ArrowRight]),
+        axis(&[KeyCode::KeyS, KeyCode::ArrowDown], &[KeyCode::KeyW, KeyCode::ArrowUp]),
+    );
+    let step = cam.view_h * 0.01;
+    cam.focus += Vec2::new(r, -f) * step;
+    let dragging = mouse.pressed(MouseButton::Right)
+        || mouse.pressed(MouseButton::Middle)
+        || (mouse.pressed(MouseButton::Left) && *tool == ActiveTool::Pan && !over_ui);
+    if dragging {
+        cam.drag(motion.delta, h);
     }
     let lines = match scroll.unit {
         MouseScrollUnit::Line => scroll.delta.y,
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
-    if lines != 0.0 {
+    if lines != 0.0 && !over_ui {
         cam.zoom(lines);
     }
-    focus.0 = Vec2::new(cam.focus.x, cam.focus.z);
-    for mut t in &mut q {
-        *t = Transform::from_translation(cam.eye()).looking_at(cam.focus, Vec3::Y);
+    focus.pos = cam.focus;
+    focus.radius = cam.chunk_radius();
+    for (mut t, mut p) in &mut q {
+        *t = Transform::from_xyz(cam.focus.x, HEIGHT, cam.focus.y)
+            .looking_at(Vec3::new(cam.focus.x, 0.0, cam.focus.y), Vec3::NEG_Z);
+        if let Projection::Orthographic(o) = &mut *p {
+            o.scaling_mode = ScalingMode::FixedVertical { viewport_height: cam.view_h };
+        }
     }
 }
 
@@ -100,28 +116,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn eye_is_dist_from_focus_and_clamps() {
-        let mut c = OrbitCam::looking_at(Vec3::new(10.0, 0.0, 20.0));
-        assert!((c.eye().distance(c.focus) - c.dist).abs() < 1e-3);
+    fn zoom_clamps_and_framing_fits() {
+        let mut c = MapCam::framing(Vec2::new(10.0, 20.0), 160.0);
+        assert_eq!(c.view_h, 200.0);
         for _ in 0..200 {
             c.zoom(1.0);
         }
-        assert_eq!(c.dist, MIN_DIST);
+        assert_eq!(c.view_h, MIN_VIEW);
         for _ in 0..200 {
             c.zoom(-1.0);
         }
-        assert_eq!(c.dist, MAX_DIST);
-        c.orbit(Vec2::new(0.0, 1e6));
-        assert_eq!(c.pitch, MAX_PITCH);
+        assert_eq!(c.view_h, MAX_VIEW);
     }
 
     #[test]
-    fn pan_forward_moves_away_from_eye_on_ground() {
-        let mut c = OrbitCam::looking_at(Vec3::ZERO);
-        let eye_xz = Vec2::new(c.eye().x, c.eye().z);
-        c.pan(0.0, 1.0);
-        assert_eq!(c.focus.y, 0.0);
-        let f = Vec2::new(c.focus.x, c.focus.z);
-        assert!(f.length() > 0.0 && f.distance(eye_xz) > eye_xz.length());
+    fn drag_moves_map_with_cursor() {
+        let mut c = MapCam { focus: Vec2::ZERO, view_h: 360.0 };
+        c.drag(Vec2::new(10.0, -20.0), 720.0); // cursor right/up => map right/up => focus left/down(+z)
+        assert_eq!(c.focus, Vec2::new(-5.0, 10.0));
     }
 }

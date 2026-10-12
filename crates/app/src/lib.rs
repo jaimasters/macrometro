@@ -4,14 +4,16 @@ use bevy::prelude::*;
 use std::sync::Arc;
 
 mod camera;
+mod capture;
+mod hud;
 pub mod shell;
 mod terrain;
 mod zones;
 
-pub use camera::{OrbitCam, OrbitCameraPlugin};
+pub use camera::{MapCam, MapCameraPlugin};
 pub use shell::{to_transit, ShellPlugin, StationMap};
-pub use terrain::{chunk_triangles, ground_y, wanted_chunks, TerrainPlugin, HEIGHT_SCALE};
-pub use zones::{build_zones, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneLayout, ZonesPlugin};
+pub use terrain::{chunk_triangles, ground_y, wanted_chunks, TerrainPlugin};
+pub use zones::{build_zones, GrowthLink, GrowthSimulation, GrowthSnapshot, ZoneBlock, ZoneGeo, ZoneKind, ZoneLayout, ZonesPlugin};
 
 /// Every macrometro feature plugin, in dependency order, then the shell that ties them together.
 pub struct MacrometroPlugins;
@@ -29,13 +31,16 @@ impl PluginGroup for MacrometroPlugins {
             .add(ui_tools::UiToolsPlugin)
             .add(ShellSetup)
             .add(TerrainPlugin)
-            .add(OrbitCameraPlugin)
+            .add(MapCameraPlugin)
             .add(ZonesPlugin)
             .add(ShellPlugin)
+            .add(sound::SoundPlugin)
+            .add(hud::HudPlugin)
+            .add(capture::CapturePlugin)
     }
 }
 
-/// Seeds the ground-height lookup and the opening camera from the generated world.
+/// Seeds the ground-height lookup and frames the opening camera on the first city.
 struct ShellSetup;
 
 impl Plugin for ShellSetup {
@@ -45,7 +50,8 @@ impl Plugin for ShellSetup {
         if let Some(c) = app.world().get_resource::<world_gen::Cities>().and_then(|c| c.0.first()) {
             let (ox, oz) = c.center.origin_cell();
             let half = world_gen::CHUNK_SIZE as f32 / 2.0;
-            app.insert_resource(OrbitCam::looking_at(Vec3::new(ox as f32 + half, 0.0, oz as f32 + half)));
+            let extent = (2 * c.radius + 1) as f32 * world_gen::CHUNK_SIZE as f32;
+            app.insert_resource(MapCam::framing(Vec2::new(ox as f32 + half, oz as f32 + half), extent));
         }
     }
 }
@@ -65,12 +71,13 @@ mod tests {
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<AccumulatedMouseMotion>()
             .init_resource::<AccumulatedMouseScroll>()
+            .add_plugins(bevy::audio::AudioPlugin::default())
             .add_plugins(MacrometroPlugins);
         app.update();
         let n = app.world().resource::<ZoneLayout>().0.len();
         assert!(n > 0);
-        let blocks = app.world_mut().query::<&ZoneBlock>().iter(app.world()).count();
-        assert_eq!(blocks, n);
+        let zones: std::collections::HashSet<usize> = app.world_mut().query::<&ZoneBlock>().iter(app.world()).map(|b| b.0).collect();
+        assert_eq!(zones.len(), n);
         // Transit publishes costs on FixedUpdate; the sim thread then grows zones.
         app.world_mut().run_schedule(FixedUpdate);
         assert!(app.world().resource::<growth::Costs>().0.is_some(), "transit never published costs");
@@ -97,6 +104,7 @@ mod tests {
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<AccumulatedMouseMotion>()
             .init_resource::<AccumulatedMouseScroll>()
+            .add_plugins(bevy::audio::AudioPlugin::default())
             .add_plugins(MacrometroPlugins);
         app.update();
         app.world_mut().run_schedule(FixedUpdate);

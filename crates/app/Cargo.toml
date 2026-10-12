@@ -14,3 +14,8 @@ economy = { path = "../economy" }
 render_budget = { path = "../render_budget" }
 save = { path = "../save" }
 ui_tools = { path = "../ui_tools" }
+sound = { path = "../sound" }
+
+# System UI font for the HUD (native only; wasm keeps Bevy's built-in font).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { workspace = true, features = ["system_font_discovery"] }

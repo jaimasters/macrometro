@@ -1,19 +1,40 @@
 //! Growth zones from world_gen cities, run as a sim_core `Simulation`, drawn as extruded blocks by population.
-use crate::terrain::ground_y;
 use bevy::prelude::*;
 use growth::{CostMatrix, GrowthParams, GrowthSim, RoadAgency, RoadPlan as ZonePlan, Zone, ZoneId, Zones};
 use sim_core::{AgencyCommand, Handoff, Sim, Simulation};
 use std::sync::{Arc, Mutex};
 use transit::{EdgeKind, NodeId, TransitAction, TransitCommand};
-use world_gen::{CityRegion, WorldSeed, CHUNK_SIZE};
+use world_gen::{CityRegion, CHUNK_SIZE};
+
+/// Layer height of zone glyphs (flat 2D stack: land 0 < ghosts < zones < lines < stations < trains).
+pub const Y_ZONE: f32 = 1.0;
 
 /// Peak zone capacity (residents) at a city centre; falls off to the region edge.
 const PEAK_CAPACITY: f64 = 2000.0;
+
+/// Land-use type; drives glyph shape and colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneKind {
+    Residential,
+    Commercial,
+    Industrial,
+}
+
+impl ZoneKind {
+    pub fn colour(self) -> Color {
+        match self {
+            ZoneKind::Residential => Color::srgb(0.52, 0.74, 0.58),
+            ZoneKind::Commercial => Color::srgb(0.95, 0.62, 0.28),
+            ZoneKind::Industrial => Color::srgb(0.60, 0.54, 0.76),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZoneGeo {
     pub center: Vec2,
     pub city: u32,
+    pub kind: ZoneKind,
 }
 
 /// One zone per city chunk, ids ascending. Returns zones, geometry and 4-neighbour index pairs.
@@ -29,7 +50,15 @@ pub fn build_zones(cities: &[CityRegion]) -> (Zones, Vec<ZoneGeo>, Vec<(usize, u
             let half = CHUNK_SIZE as f32 / 2.0;
             let pop = capacity * 0.05;
             zones.push(Zone { id: ZoneId(zones.len() as u32), pop, jobs: pop * 0.4, capacity, crowding: 0.0 });
-            geo.push(ZoneGeo { center: Vec2::new(ox as f32 + half, oz as f32 + half), city: c.id.0 });
+            let ring = dx.max(dz);
+            let kind = if ring == 0 {
+                ZoneKind::Commercial
+            } else if ring == r && (ch.x + ch.z) % 2 == 0 {
+                ZoneKind::Industrial
+            } else {
+                ZoneKind::Residential
+            };
+            geo.push(ZoneGeo { center: Vec2::new(ox as f32 + half, oz as f32 + half), city: c.id.0, kind });
             let (i, j) = (k as i64 % w, k as i64 / w);
             if i < w - 1 {
                 pairs.push((base + k, base + k + 1));
@@ -136,14 +165,36 @@ struct WasmPump {
     clock: sim_core::FixedClock,
 }
 
+/// One flat glyph (a small building footprint) of a zone; `slot` orders them so density reveals them in turn.
 #[derive(Component)]
 pub struct ZoneBlock(pub usize);
 
-/// Block footprint (cells) and height scale: ~ sqrt so large zones don't dwarf the terrain.
-const BLOCK_FOOTPRINT: f32 = 20.0;
+#[derive(Component)]
+pub struct Glyph {
+    pub slot: usize,
+    pub jitter: f32,
+}
 
-pub fn block_height(pop: f32) -> f32 {
-    1.0 + 0.8 * pop.max(0.0).sqrt()
+/// Glyph slot offsets within a zone (3x3, centre first).
+const SLOTS: [(f32, f32); 9] =
+    [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0)];
+const SLOT_PITCH: f32 = 7.0;
+
+fn hash01(a: u64, b: u64) -> f32 {
+    let mut h = a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    ((h >> 40) as f32) / (1u64 << 24) as f32
+}
+
+/// How many glyphs a zone shows, from its population (density); `jitter` varies neighbours by one.
+pub fn glyph_count(pop: f32, jitter: f32) -> usize {
+    let d = (pop / PEAK_CAPACITY as f32 * 3.0).clamp(0.0, 1.0).sqrt();
+    ((1.0 + 8.0 * d + jitter * 1.5).floor() as usize).clamp(1, 9)
+}
+
+pub fn glyph_size(pop: f32, jitter: f32) -> f32 {
+    4.0 + 3.5 * (pop / PEAK_CAPACITY as f32 * 3.0).clamp(0.0, 1.0).sqrt() * (0.6 + 0.8 * jitter)
 }
 
 /// Segment drawn for a zone's planned road: from the zone centre to its nearest other zone.
@@ -192,21 +243,43 @@ fn pump_wasm(time: Res<Time>, mut p: NonSendMut<WasmPump>) {
 
 fn spawn_blocks(
     layout: Res<ZoneLayout>,
-    seed: Res<WorldSeed>,
+    seed: Res<world_gen::WorldSeed>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
-    let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let mat = mats.add(StandardMaterial { base_color: Color::srgb(0.85, 0.55, 0.30), perceptual_roughness: 1.0, ..default() });
+    // Flat footprints seen from above: squares (residential), circles (commercial), diamonds (industrial).
+    let square = meshes.add(Cuboid::new(1.0, 0.3, 1.0));
+    let circle = meshes.add(Cylinder::new(0.5, 0.3));
+    let mut mat = |k: ZoneKind| mats.add(StandardMaterial { base_color: k.colour(), unlit: true, ..default() });
+    let mats3 = [(ZoneKind::Residential, mat(ZoneKind::Residential)), (ZoneKind::Commercial, mat(ZoneKind::Commercial)), (ZoneKind::Industrial, mat(ZoneKind::Industrial))];
     for (i, g) in layout.0.iter().enumerate() {
-        let y = ground_y(seed.0, g.center.x, g.center.y);
-        commands.spawn((
-            ZoneBlock(i),
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_xyz(g.center.x, y, g.center.y).with_scale(Vec3::new(BLOCK_FOOTPRINT, 0.1, BLOCK_FOOTPRINT)),
-        ));
+        let material = mats3.iter().find(|(k, _)| *k == g.kind).unwrap().1.clone();
+        let mesh = if g.kind == ZoneKind::Commercial { circle.clone() } else { square.clone() };
+        for (slot, (ox, oz)) in SLOTS.iter().enumerate() {
+            let jitter = hash01(i as u64, slot as u64);
+            let p = g.center + Vec2::new(*ox, *oz) * SLOT_PITCH;
+            if world_gen::height(seed.0, p.x as f64, p.y as f64) < world_gen::SEA_LEVEL {
+                continue; // no buildings on water
+            }
+            let rot = if g.kind == ZoneKind::Industrial { Quat::from_rotation_y(std::f32::consts::FRAC_PI_4) } else { Quat::IDENTITY };
+            commands.spawn((
+                ZoneBlock(i),
+                Glyph { slot, jitter },
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(material.clone()),
+                Transform {
+                    translation: Vec3::new(
+                        g.center.x + ox * SLOT_PITCH + (jitter - 0.5) * 3.0,
+                        Y_ZONE,
+                        g.center.y + oz * SLOT_PITCH + (hash01(i as u64, slot as u64 + 50) - 0.5) * 3.0,
+                    ),
+                    rotation: rot,
+                    scale: Vec3::ONE,
+                },
+                Visibility::Hidden,
+            ));
+        }
     }
 }
 
@@ -222,21 +295,21 @@ fn sync_inputs(costs: Res<growth::Costs>, shares: Res<transit::TransitShares>, l
 
 fn update_blocks(
     link: Res<GrowthLink>,
-    seed: Res<WorldSeed>,
-    layout: Res<ZoneLayout>,
     mut last: Local<Option<u64>>,
-    mut q: Query<(&ZoneBlock, &mut Transform)>,
+    mut q: Query<(&ZoneBlock, &Glyph, &mut Transform, &mut Visibility)>,
 ) {
     let s = link.snapshots.latest();
     if *last == Some(s.tick) {
         return;
     }
     *last = Some(s.tick);
-    for (b, mut t) in &mut q {
-        let (Some(&pop), Some(g)) = (s.pop.get(b.0), layout.0.get(b.0)) else { continue };
-        let h = block_height(pop);
-        t.scale.y = h;
-        t.translation.y = ground_y(seed.0, g.center.x, g.center.y) + h / 2.0;
+    for (b, g, mut t, mut v) in &mut q {
+        let Some(&pop) = s.pop.get(b.0) else { continue };
+        // zone-level jitter (slot 0's) so neighbouring zones differ
+        let zone_j = hash01(b.0 as u64, 99);
+        *v = if g.slot < glyph_count(pop, zone_j) { Visibility::Inherited } else { Visibility::Hidden };
+        let size = glyph_size(pop, g.jitter);
+        t.scale = Vec3::new(size, 1.0, size);
     }
 }
 
@@ -313,7 +386,14 @@ mod tests {
     }
 
     #[test]
-    fn block_height_monotone() {
-        assert!(block_height(0.0) < block_height(100.0) && block_height(100.0) < block_height(1000.0));
+    fn glyphs_grow_with_density_and_cover_kinds() {
+        assert_eq!(glyph_count(0.0, 0.0), 1);
+        assert_eq!(glyph_count(PEAK_CAPACITY as f32, 0.9), 9);
+        assert!(glyph_count(100.0, 0.0) < glyph_count(1500.0, 0.0));
+        assert!(glyph_size(10.0, 0.5) < glyph_size(1900.0, 0.5));
+        let (_, geo, _) = build_zones(&generate_cities(1, 3));
+        for k in [ZoneKind::Residential, ZoneKind::Commercial] {
+            assert!(geo.iter().any(|g| g.kind == k));
+        }
     }
 }
