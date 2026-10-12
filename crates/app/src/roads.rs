@@ -26,6 +26,11 @@ const VIS_SPEED: f32 = 1.5;
 /// Journeys started per second per simulated car trip/hour (a sample: the pool is capped anyway).
 const SAMPLE: f32 = 0.015;
 const Y_CAR: f32 = 0.62;
+/// Car length, bumper gap at rest, acceleration and braking (world units, units/s^2).
+const CAR_LEN: f32 = 1.6;
+const CAR_GAP: f32 = 0.8;
+const CAR_ACCEL: f32 = 4.0;
+const CAR_BRAKE: f32 = 8.0;
 const NEUTRAL: u8 = 255;
 
 #[derive(Component)]
@@ -68,6 +73,8 @@ struct Journey {
     trip: Trip,
     seg: usize,
     along: f32,
+    /// Current speed (world units / s): cars accelerate and brake, they do not jump to the limit.
+    v: f32,
 }
 
 #[derive(Resource)]
@@ -78,21 +85,83 @@ struct Journeys {
     router: Router,
 }
 
-/// Move a journey `dt` seconds along its route; `slow(edge)` = congestion slowdown. False once it has arrived.
-fn advance(j: &mut Journey, mut dt: f32, slow: impl Fn(usize) -> f32) -> bool {
+/// Free-flow speed on the car's current segment, slowed by congestion.
+fn target_speed(j: &Journey, slow: &impl Fn(usize) -> f32) -> f32 {
+    j.trip.seg_speed[j.seg] * VIS_SPEED / slow(j.trip.seg_edge[j.seg]).max(1.0)
+}
+
+/// Advance `d` world units along the route. False once it has arrived.
+fn move_by(j: &mut Journey, mut d: f32) -> bool {
     while j.seg + 1 < j.trip.pts.len() {
         let len = j.trip.pts[j.seg].distance(j.trip.pts[j.seg + 1]).max(1e-3);
-        let speed = j.trip.seg_speed[j.seg] * VIS_SPEED / slow(j.trip.seg_edge[j.seg]).max(1.0);
-        let left = (len - j.along) / speed;
-        if dt < left {
-            j.along += speed * dt;
+        if j.along + d < len {
+            j.along += d;
             return true;
         }
-        dt -= left;
+        d -= len - j.along;
         j.seg += 1;
         j.along = 0.0;
     }
     false
+}
+
+#[cfg(test)]
+fn advance(j: &mut Journey, dt: f32, slow: impl Fn(usize) -> f32) -> bool {
+    let v = target_speed(j, &slow);
+    move_by(j, v * dt)
+}
+
+/// Road segment a car is on, with its direction: cars share a lane only when this matches.
+fn lane_key(j: &Journey) -> Option<(usize, bool)> {
+    let (a, b) = (*j.trip.pts.get(j.seg)?, *j.trip.pts.get(j.seg + 1)?);
+    let e = *j.trip.seg_edge.get(j.seg)?;
+    Some((e, (b.x, b.y) > (a.x, a.y)))
+}
+
+fn seg_len(j: &Journey) -> f32 {
+    j.trip.pts[j.seg].distance(j.trip.pts[j.seg + 1])
+}
+
+/// One car-following step for every car (in index order, deterministic): accelerate toward the congestion-limited
+/// speed, but never faster than lets the car stop behind the one ahead in its lane.
+fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32) {
+    let mut lanes: std::collections::HashMap<(usize, bool), Vec<f32>> = std::collections::HashMap::new();
+    for c in cars.iter() {
+        if let Some(k) = lane_key(c) {
+            lanes.entry(k).or_default().push(c.along);
+        }
+    }
+    let next_key = |c: &Journey| {
+        let mut n = Journey { trip: Trip { pts: c.trip.pts.clone(), seg_edge: c.trip.seg_edge.clone(), ..c.trip.clone() }, seg: c.seg + 1, along: 0.0, v: 0.0 };
+        if n.seg + 1 >= n.trip.pts.len() {
+            return None;
+        }
+        n.along = 0.0;
+        lane_key(&n)
+    };
+    let mut keep = vec![];
+    for i in 0..cars.len() {
+        let c = &cars[i];
+        let gap = lane_key(c).and_then(|k| {
+            let same = lanes.get(&k).into_iter().flatten().copied().filter(|&a| a > c.along + 1e-4).fold(f32::INFINITY, f32::min);
+            if same.is_finite() {
+                return Some(same - c.along - CAR_LEN);
+            }
+            let nk = next_key(c)?;
+            let ahead = lanes.get(&nk)?.iter().copied().fold(f32::INFINITY, f32::min);
+            ahead.is_finite().then(|| seg_len(c) - c.along + ahead - CAR_LEN)
+        });
+        let vmax = match gap {
+            Some(g) => target_speed(c, &slow).min((2.0 * CAR_BRAKE * (g - CAR_GAP).max(0.0)).sqrt()),
+            None => target_speed(c, &slow),
+        };
+        let c = &mut cars[i];
+        c.v += (vmax - c.v).clamp(-CAR_BRAKE * dt, CAR_ACCEL * dt);
+        c.v = c.v.max(0.0);
+        keep.push(move_by(c, c.v * dt));
+    }
+    let mut k = keep.into_iter();
+    cars.retain(|_| k.next().unwrap_or(true));
 }
 
 /// Position and heading of a journey (driving on one side of the road).
@@ -218,14 +287,17 @@ fn drive_cars(
     let s = link.snapshots.latest();
     let dt = time.delta_secs().min(0.1);
     let slow = |e: usize| s.slow.get(e).copied().unwrap_or(1.0);
-    j.cars.retain_mut(|c| advance(c, dt, slow));
+    follow_step(&mut j.cars, dt, slow);
     j.acc = (j.acc + s.car_trips * SAMPLE * dt).min(6.0);
     while j.acc >= 1.0 && j.cars.len() < MAX_CARS {
         j.acc -= 1.0;
         let j = &mut *j;
         let Some((a, b)) = j.router.sample(&s.built, &s.pop, &s.zone_share, s.hour as f64, &mut j.rng) else { break };
         if let Some(trip) = j.router.route(&s.built, &s.slow, a, b) {
-            j.cars.push(Journey { trip, seg: 0, along: 0.0 });
+            // a new car waits at its origin until the lane's entrance is clear
+            if !j.cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts.first() == trip.pts.first()) {
+                j.cars.push(Journey { trip, seg: 0, along: 0.0, v: 0.0 });
+            }
         }
     }
     for (d, mut tf, mut v) in &mut dots {
@@ -267,7 +339,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
         };
-        Journey { trip, seg: 0, along: 0.0 }
+        Journey { trip, seg: 0, along: 0.0, v: 0.0 }
     }
 
     #[test]
@@ -288,5 +360,38 @@ mod tests {
         advance(&mut free, 1.0, |_| 1.0);
         advance(&mut jam, 1.0, |_| 3.0);
         assert!((free.along - 3.0).abs() < 1e-4 && (jam.along - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn cars_queue_behind_a_slow_leader_and_never_overlap() {
+        let mut cars: Vec<Journey> = (0..6).map(|i| { let mut j = journey(4.0); j.along = i as f32 * 2.5; j }).collect();
+        cars[5].v = 0.0;
+        // the leader crawls (congestion x20); the followers must stack up behind it
+        for _ in 0..600 {
+            let lead = cars.len() - 1;
+            follow_step(&mut cars, 0.05, |e| if e == 99 { 1.0 } else { 1.0 });
+            let _ = lead;
+            if cars.len() < 6 { break; }
+            cars.sort_by(|a, b| a.along.total_cmp(&b.along));
+            for w in cars.windows(2) {
+                if w[0].seg == w[1].seg {
+                    assert!(w[1].along - w[0].along >= CAR_LEN - 1e-3, "overlap {} {}", w[0].along, w[1].along);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_car_brakes_for_a_stopped_leader() {
+        let mut cars = vec![journey(4.0), journey(4.0)];
+        cars[0].along = 2.0;
+        cars[1].along = 8.0;
+        for _ in 0..200 {
+            follow_step(&mut cars, 0.05, |_| 1.0);
+            if cars.len() < 2 { return; }
+            cars[1].v = 0.0;
+            cars[1].along = 8.0; // pinned stopped
+        }
+        assert!(cars[0].along <= 8.0 - CAR_LEN, "stopped behind, got {}", cars[0].along);
     }
 }
