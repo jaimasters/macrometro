@@ -18,3 +18,5 @@ Crate: crates/growth (pub API = lib.rs only). Pure-Rust core in src/core.rs (no 
 - apply_deltas_sorted_order_deterministic, apply_deltas_clamps_capacity
 - same_inputs_same_hash (50 steps), growth_converges_toward_capacity
 - plugin_step_changes_zones (bevy App with MinimalPlugins, one FixedUpdate run)
+## City road agency (D-7)
+- Zone underserved (transit share < s_min for T ticks) -> city adds road plan + increases road_reserve (consumed by economy). Plans emitted one cycle ahead as RoadPlan events for UI ghosts. Deterministic test required.

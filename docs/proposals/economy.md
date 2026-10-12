@@ -1,4 +1,5 @@
 # Economy / success proposals (Jai to choose)
+STATUS: P1 (modified) CHOSEN, see DECISIONS D-6, D-8.
 Context: agency is non-profit; Jai dislikes money as primary; wants diverse metrics incl. efficiency.
 ## P1 Political capital + scorecard (RECOMMENDED)
 - Currency = mandate (political capital), earned per tick from a scorecard: accessibility gain, mean trip time, transit share, crowding, emissions, coverage equity. Spent on construction/acquisition.
