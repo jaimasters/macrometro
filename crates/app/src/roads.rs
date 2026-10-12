@@ -540,6 +540,8 @@ fn spawn_roads(
         }
     }
     // R31 roundabouts: a road-surface disc with a planted island, at real junctions only (default classes)
+    // one opaque layer each: thin slabs at distinct heights (asphalt below the edges, island above), never z-fighting;
+    // neighbouring rings cannot overlap (organic::junction_gap + Ring::at 40% leg cap)
     let inc = cp.plan.graph.incident();
     let cls = |e: usize| city::lanes::default_class(cp.plan.graph.edges[e].class);
     let rings: Rings = (0..inc.len()).filter_map(|n| city::junctions::Ring::at(&cp.plan.graph, &inc[n], n, cls).map(|r| (pkey(r.c), r))).collect();
@@ -547,7 +549,7 @@ fn spawn_roads(
     let island = flat(Color::srgb(0.55, 0.66, 0.45));
     for r in rings.values() {
         let e = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].first().copied().unwrap_or(0);
-        let at = |rad: f32, y: f32| Transform::from_xyz(r.c.x, y, r.c.y).with_scale(Vec3::new(rad, 0.1, rad));
+        let at = |rad: f32, y: f32| Transform::from_xyz(r.c.x, y, r.c.y).with_scale(Vec3::new(rad, 0.02, rad));
         let major = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].iter().any(|&k| cp.plan.graph.edges[k].class == RoadClass::Arterial);
         commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(m.base[major as usize].clone()), at(r.r + 1.0, Y_ROAD + 0.03), Visibility::Hidden));
         commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(island.clone()), at((r.r - 1.0).max(0.4), Y_ROAD + 0.09), Visibility::Hidden));

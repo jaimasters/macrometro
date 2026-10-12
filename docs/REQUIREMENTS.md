@@ -59,9 +59,8 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | 2 | R42 (d) freeways + overpass drawing; upgrades re-align with eminent domain | later | presets worker | B3 |
 | 3 | R39 remainder: new lines through existing stations; re-lay existing lines | later | unassigned | B3 |
 | 4 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
-| 5 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
-| 6 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
-| 7 | Road sizing (with item 2 spacing): one LANE_W ~1.3x car width; road width = lanes*LANE_W + kerbs; car sprite, lane offset, strokes, driveways from LANE_W; mitred segment joins (no notch); test per class car_w < LANE_W <= road_w/lanes and joins share edge points | next | presets worker | B2 |
-| 8 | One-lane lowest tier (with item 10): no centre/lane marks; two-way shares the lane; head-on meet: both slow, shift left (may leave road), recentre after; test: both below passing speed, lateral gap >= car width, no overlap, both arrive; tier mesh has no markings; alone: drives on the centreline (test within tolerance), shifts left only while passing | next | presets worker | B2 |
-| 9 | Disconnected roads/stubs (Jai screenshot): root-cause runtime growth gap near roundabout; growth never leaves a road disconnected; stubs connect or aren't built; extend organic.rs:187 test to N growth ticks: connected, no dead-end stubs off junctions | next | presets worker | B2 |
+| 5 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
+| 6 | Road sizing (with item 2 spacing): one LANE_W ~1.3x car width; road width = lanes*LANE_W + kerbs; car sprite, lane offset, strokes, driveways from LANE_W; mitred segment joins (no notch); test per class car_w < LANE_W <= road_w/lanes and joins share edge points | next | presets worker | B2 |
+| 7 | One-lane lowest tier (with item 10): no centre/lane marks; two-way shares the lane; head-on meet: both slow, shift left (may leave road), recentre after; test: both below passing speed, lateral gap >= car width, no overlap, both arrive; tier mesh has no markings; alone: drives on the centreline (test within tolerance), shifts left only while passing | next | presets worker | B2 |
+| 8 | Disconnected roads/stubs (Jai screenshot): root-cause runtime growth gap near roundabout; growth never leaves a road disconnected; stubs connect or aren't built; extend organic.rs:187 test to N growth ticks: connected, no dead-end stubs off junctions | next | presets worker | B2 |
 
