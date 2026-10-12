@@ -93,6 +93,10 @@ pub fn encode(s: &GameSave) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn save_path() -> std::path::PathBuf {
+    // Tests must never read or overwrite the player's real save.
+    if cfg!(test) && std::env::var("MM_SAVE").is_err() {
+        return std::env::temp_dir().join(format!("macrometro-test-{}.ron", std::process::id()));
+    }
     if let Ok(p) = std::env::var("MM_SAVE") {
         return p.into();
     }
