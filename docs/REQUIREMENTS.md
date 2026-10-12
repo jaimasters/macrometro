@@ -25,4 +25,5 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | R18 | Level crossings, bridges, underpasses cost money | Each crossing type priced | C1+C2 / mgr-city | Requested | |
 | R19 | "game is quite laggy" | Frame time before/after reported from live session | mgr-perf | In progress (logging merged) | 1bd7846 |
 | R21 | Track placer curves around roads/buildings; mouse steers (long way round); leftover building hits = eminent domain, road hits = level crossing (upgradeable to bridge) | Routing avoids obstacle when clear space exists; steering flips the side; unavoidable collisions priced; preview shows route, demolitions, crossings, total cost | C1+C2 / mgr-city | Requested | |
+| R22 | Future roads flash in and out ("disjoint and silly") | Planned roads appear once and persist until built; no full respawn on plan change | orchestrator | In progress | |
 | R20 | Requirements tracker with delivery status | This file kept current on every merge | orchestrator | Merged (not seen on screen) | this commit |

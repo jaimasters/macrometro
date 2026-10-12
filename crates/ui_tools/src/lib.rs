@@ -27,7 +27,7 @@ pub struct CursorWorld(pub Option<Vec2>);
 
 /// Marker on spawned road-plan ghost meshes.
 #[derive(Component)]
-pub struct RoadGhost;
+pub struct RoadGhost(pub [u32; 4]);
 
 /// Marker on the live line-drag preview meshes.
 #[derive(Component)]
@@ -181,20 +181,28 @@ fn draw_preview(
     }
 }
 
-/// Replace the ghost set with the latest GhostRoads. Faint, unlit, translucent (D-7: no popups).
+/// Diff the ghost set against the latest GhostRoads: keep unchanged segments, spawn only new ones,
+/// despawn only those no longer planned. Respawning the whole set on every change made planned
+/// roads flash in and out (R22).
 fn spawn_road_ghosts(
     mut plans: MessageReader<GhostRoads>,
-    old: Query<Entity, With<RoadGhost>>,
+    old: Query<(Entity, &RoadGhost)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut handles: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
 ) {
     let Some(plan) = plans.read().last() else { return };
-    for e in &old {
-        commands.entity(e).despawn();
+    let key = |a: Vec2, b: Vec2| [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+    let wanted: std::collections::HashSet<_> = plan.segments.iter().map(|&(a, b)| key(a, b)).collect();
+    let mut have = std::collections::HashSet::new();
+    for (e, g) in &old {
+        if wanted.contains(&g.0) {
+            have.insert(g.0);
+        } else {
+            commands.entity(e).despawn();
+        }
     }
-    // Create the shared mesh/material once; re-adding them on every plan change leaked assets and stalled frames.
     let (mesh, mat) = handles
         .get_or_insert_with(|| {
             let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
@@ -208,12 +216,14 @@ fn spawn_road_ghosts(
         })
         .clone();
     for &(a, b) in &plan.segments {
-        commands.spawn((
-            RoadGhost,
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(mat.clone()),
-            segment_transform(a, b, Y_GHOST, GHOST_WIDTH, GHOST_THICKNESS),
-        ));
+        if have.insert(key(a, b)) {
+            commands.spawn((
+                RoadGhost(key(a, b)),
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                segment_transform(a, b, Y_GHOST, GHOST_WIDTH, GHOST_THICKNESS),
+            ));
+        }
     }
 }
 
