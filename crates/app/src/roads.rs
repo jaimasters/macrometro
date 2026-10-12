@@ -281,11 +281,31 @@ impl Journey {
     fn arrived(&self) -> bool {
         self.seg + 2 >= self.trip.pts.len() && seg_len(self) - self.along < 0.15
     }
-    /// Corner speed: slow enough that the curvature needed to reach the path 4 units ahead keeps lateral accel <= 3.
+    /// Corner speed (speed planning): the tightest radius the car can drive is R_MIN = L / tan(steer max) (the yaw
+    /// cap only binds above v = MAX_YAW * R_MIN). For every route corner within braking distance ahead, the speed at
+    /// that corner is capped at sqrt(A_LAT * R) with R the radius the corner needs (sharper = smaller, never below
+    /// R_MIN), and the car brakes (at half CAR_BRAKE) to reach it in time. Covers driveway exits, junction turns and
+    /// roundabout entries alike; leaving the road while turning stays allowed, swinging wide at speed does not.
     fn corner_speed(&self) -> f32 {
+        const A_LAT: f32 = 2.5;
+        let r_min = WHEELBASE / MAX_STEER.tan();
         let to = self.lookahead(4.0) - self.pos;
         let k = 2.0 * self.dir().angle_to(to).sin().abs() / to.length().max(0.5);
-        (2.5 / k.max(1e-3)).sqrt().max(1.0)
+        let mut v = (A_LAT / k.max(1e-3)).sqrt().max(1.0);
+        let reach = self.v * self.v / CAR_BRAKE + 6.0;
+        let mut d = seg_len(self) - self.along;
+        for s in self.seg + 1..self.trip.pts.len() - 1 {
+            if d > reach {
+                break;
+            }
+            let turn = seg_dir(&self.trip, s - 1).angle_to(seg_dir(&self.trip, s)).abs();
+            if turn > 0.15 {
+                let r = (1.2 * std::f32::consts::FRAC_PI_2 / turn).max(r_min);
+                v = v.min(((A_LAT * r) + CAR_BRAKE * (d - LANE_OFF).max(0.0)).sqrt());
+            }
+            d += self.trip.pts[s].distance(self.trip.pts[s + 1]);
+        }
+        v.max(0.8)
     }
     /// One kinematic-bicycle tick at the already-chosen speed `self.v`: pure pursuit picks a steering angle, slewed
     /// and clamped; yaw rate is capped; position integrates along the heading. Nothing here reads the pose off the spline.
@@ -807,6 +827,44 @@ mod tests {
                 drive_alone(trip);
             }
         }
+    }
+
+    /// Queue (driveway swing, seen on 1d9be02): a car pulling out of a long driveway at a right angle brakes for the
+    /// turn and overshoots the far lane edge by at most about a lane; at a lower forced speed it turns tighter.
+    #[test]
+    fn a_car_slows_for_a_right_angle_driveway_exit_and_turns_tighter_when_slower() {
+        let drive = || Trip { from: 0, to: 1, pts: vec![Vec2::new(0.0, -14.0), Vec2::ZERO, Vec2::new(30.0, 0.0)], seg_edge: vec![0, 1], seg_speed: vec![8.0, 8.0], nodes: vec![], edges: vec![] };
+        let (mut peak, mut at_turn, mut wide) = (0.0f32, f32::INFINITY, 0.0f32);
+        drive_car(Journey::new(drive(), false, 0), |c| {
+            if c.seg == 0 {
+                peak = peak.max(c.v);
+            }
+            if c.pos.length() < 1.5 {
+                at_turn = at_turn.min(c.v);
+            }
+            wide = wide.max(c.pos.y);
+        });
+        let far_edge = 2.0 * LANE_OFF;
+        assert!(at_turn < 0.6 * peak, "did not slow for the turn: {at_turn} at the corner vs {peak} on the driveway");
+        assert!(wide <= far_edge + 2.0 * LANE_OFF, "swung {wide} wide (far lane edge {far_edge})");
+        // tightest radius driven at a forced constant speed: v / peak yaw rate
+        let radius = |v: f32| {
+            let mut j = Journey::new(drive(), false, 0);
+            let mut yaw = 0.0f32;
+            for _ in 0..4000 {
+                let h = j.head;
+                j.v = v;
+                j.drive(0.02);
+                yaw = yaw.max((j.head - h).abs() / 0.02);
+                if j.seg == 1 && j.along > 6.0 {
+                    break;
+                }
+            }
+            v / yaw.max(1e-3)
+        };
+        let (slow, fast) = (radius(1.0), radius(4.0));
+        assert!(slow < fast, "radius {slow} at v=1 not tighter than {fast} at v=4");
+        assert!(slow >= WHEELBASE / MAX_STEER.tan() - 0.05, "radius {slow} below the steering limit");
     }
 
     #[test]
