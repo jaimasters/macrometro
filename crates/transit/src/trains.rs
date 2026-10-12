@@ -504,6 +504,15 @@ impl TrainSim {
         cap.saturating_sub(self.extra.get(&line.0).copied().unwrap_or(0))
     }
 
+    /// Bought trains waiting in the siding at `n` (bought, not yet in service), at most the siding's capacity.
+    pub fn parked_at(&self, n: NodeId) -> usize {
+        if !self.sidings.contains_key(&n.0) {
+            return 0;
+        }
+        let waiting: usize = self.routes.iter().filter(|r| r.stops.first() == Some(&n)).map(|r| (r.wants() + self.extra.get(&r.line.0).copied().unwrap_or(0)).saturating_sub(r.spawned).min(self.extra.get(&r.line.0).copied().unwrap_or(0))).sum();
+        waiting.min(SIDING_CAPACITY)
+    }
+
     /// Buy a siding at a station (one per station); false if it already has one.
     pub fn add_siding(&mut self, n: NodeId) -> bool {
         self.sidings.insert(n.0, SIDING_CAPACITY).is_none()

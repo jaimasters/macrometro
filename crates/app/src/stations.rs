@@ -155,7 +155,7 @@ impl Plugin for StationsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedStation>()
             .add_systems(Startup, setup_mats)
-            .add_systems(Update, (select_station, rebuild, scale_with_zoom, highlight, update_gauges, place_labels).chain());
+            .add_systems(Update, (select_station, rebuild, update_sidings, scale_with_zoom, highlight, update_gauges, place_labels).chain());
     }
 }
 
@@ -354,6 +354,49 @@ fn rebuild(
                 TextFont { font: crate::hud::ui_font(), font_size: FontSize::Px(12.0), ..default() },
                 TextColor(INK),
             ));
+    }
+}
+
+/// Siding spur drawn beside a station that has one, with its parked trains (near zoom).
+#[derive(Component)]
+struct Siding(IVec2);
+
+fn update_sidings(
+    stations: Res<Stations>,
+    map: Res<StationMap>,
+    trains: Res<crate::rails::Trains>,
+    mats: Option<Res<Mats>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    old: Query<(Entity, &Siding)>,
+    mut commands: Commands,
+    mut cache: Local<HashMap<IVec2, usize>>,
+) {
+    let Some(mats) = mats else { return };
+    for &c in &stations.0 {
+        let Some(n) = map.node(c) else { continue };
+        let want = trains.0.sidings.contains_key(&n.0).then(|| 1 + trains.0.parked_at(n));
+        if cache.get(&c).copied() == want.map(|w| w) && want.is_some() == cache.contains_key(&c) {
+            continue;
+        }
+        for (e, s) in &old {
+            if s.0 == c {
+                commands.entity(e).despawn();
+            }
+        }
+        match want {
+            None => {
+                cache.remove(&c);
+            }
+            Some(w) => {
+                cache.insert(c, w);
+                let p = c.as_vec2() + Vec2::new(0.0, 7.0);
+                let bar = meshes.add(Cuboid::new(1.0, 0.1, 1.0));
+                commands.spawn((Siding(c), Tier::Near, Mesh3d(bar.clone()), MeshMaterial3d(mats.ink.clone()), Transform { translation: Vec3::new(p.x, Y_FILL, p.y), scale: Vec3::new(14.0, 1.0, 0.5), ..default() }));
+                for k in 0..w - 1 {
+                    commands.spawn((Siding(c), Tier::Near, Mesh3d(bar.clone()), MeshMaterial3d(mats.white.clone()), Transform { translation: Vec3::new(p.x - 4.0 + 6.0 * k as f32, Y_FILL + 0.1, p.y), scale: Vec3::new(5.0, 1.0, 1.4), ..default() }));
+                }
+            }
+        }
     }
 }
 

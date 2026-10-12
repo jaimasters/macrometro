@@ -340,3 +340,18 @@ fn bought_trains_join_the_line_up_to_the_cap() {
     }
     assert!(s.trains.len() > base, "{} vs {base}", s.trains.len());
 }
+
+#[test]
+fn a_bought_train_waits_in_the_siding_until_it_enters_service() {
+    let net = line_net(2, 150.0, 2, RailClass::LightRail);
+    let mut s = TrainSim::default();
+    s.step(&net);
+    s.add_siding(NodeId(0));
+    assert_eq!(s.parked_at(NodeId(0)), 0);
+    assert!(s.add_train(LineId(0)));
+    assert!(s.parked_at(NodeId(0)) >= 1, "stored until dispatched");
+    for _ in 0..(900.0 / DT) as u64 {
+        s.step(&net);
+    }
+    assert_eq!(s.parked_at(NodeId(0)), 0, "left the siding for service");
+}
