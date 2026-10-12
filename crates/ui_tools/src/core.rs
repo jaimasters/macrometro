@@ -22,6 +22,10 @@ pub enum ToolAction {
     PlaceStation { cell: IVec2 },
     /// Station cells in travel order (>= 2).
     DrawLine { cells: Vec<IVec2> },
+    /// Extend app line `line` past its terminus `from` to `to` (a new station is created if needed).
+    ExtendLine { line: usize, from: IVec2, to: IVec2 },
+    /// One more platform at the station on `cell`.
+    AddPlatform { cell: IVec2 },
 }
 
 /// A player command, always tagged with the acting agency (D-8).
@@ -103,10 +107,37 @@ pub fn delete_at(stations: &mut Stations, agency: AgencyId, p: Vec2) -> Option<T
 }
 
 /// Line-drag state: `from` is Some while the button is held after pressing on the map.
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
 pub struct LineDrag {
     pub from: Option<IVec2>,
     pub to: IVec2,
+}
+
+/// "Extend line / new line from this station" in progress (started from the station menu): the next click on
+/// the map picks the far end. `line: None` = a new line.
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineExtend(pub Option<ExtendState>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendState {
+    pub line: Option<usize>,
+    pub from: IVec2,
+    pub to: IVec2,
+}
+
+/// Click on the far end: register it as a station and emit the extend (or new-line) command.
+pub fn finish_extend(stations: &mut Stations, agency: AgencyId, st: &ExtendState) -> Option<ToolCommand> {
+    if st.from == st.to {
+        return None;
+    }
+    if !stations.0.contains(&st.to) {
+        stations.0.push(st.to);
+    }
+    let action = match st.line {
+        Some(line) => ToolAction::ExtendLine { line, from: st.from, to: st.to },
+        None => ToolAction::DrawLine { cells: vec![st.from, st.to] },
+    };
+    Some(ToolCommand { agency, action })
 }
 
 /// Stations placed so far (cells); drag endpoints snap to these.
@@ -226,5 +257,18 @@ mod tests {
         let t = segment_transform(Vec2::new(0.0, 0.0), Vec2::new(0.0, 10.0), 1.0, 2.0, 0.5);
         assert!((t.scale.x - 10.0).abs() < 1e-5 && t.translation == Vec3::new(0.0, 1.0, 5.0));
         assert!((t.rotation * Vec3::X - Vec3::Z).length() < 1e-5);
+    }
+
+    #[test]
+    fn finish_extend_registers_the_far_end_and_picks_extend_or_new_line() {
+        let mut st = Stations(vec![IVec2::new(0, 0)]);
+        let ex = |line| ExtendState { line, from: IVec2::ZERO, to: IVec2::new(40, 0) };
+        let c = finish_extend(&mut st, AgencyId(1), &ex(Some(3))).unwrap();
+        assert_eq!(c.action, ToolAction::ExtendLine { line: 3, from: IVec2::ZERO, to: IVec2::new(40, 0) });
+        assert_eq!(st.0.len(), 2);
+        let c = finish_extend(&mut st, AgencyId(1), &ex(None)).unwrap();
+        assert_eq!(c.action, ToolAction::DrawLine { cells: vec![IVec2::ZERO, IVec2::new(40, 0)] });
+        assert_eq!(st.0.len(), 2, "existing far end is not duplicated");
+        assert!(finish_extend(&mut st, AgencyId(1), &ExtendState { line: None, from: IVec2::ZERO, to: IVec2::ZERO }).is_none());
     }
 }

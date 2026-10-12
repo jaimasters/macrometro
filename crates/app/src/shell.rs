@@ -15,6 +15,8 @@ pub const PLAYER: AgencyId = AgencyId(1);
 const TRAIN_SPEED: f32 = 14.0;
 const STATION_COST: f64 = 50.0;
 const COST_PER_LEN: f64 = 2.0;
+/// Price of one extra platform (B2 station menu; C1 trains need platforms to enter).
+pub const PLATFORM_COST: f64 = 40.0;
 
 // Flat layer stack (world y): land 0 < ghosts 0.5 < zones 1 < lines 2 < preview 2.6 < station outline 3 < station 3.3 < train 4.5.
 const Y_LINE: f32 = 2.0;
@@ -41,6 +43,11 @@ impl StationMap {
         Self { next: first_free, by_cell: HashMap::new() }
     }
 
+    /// Transit node of the station on `cell`, if any.
+    pub fn node(&self, cell: IVec2) -> Option<NodeId> {
+        self.by_cell.get(&cell).copied()
+    }
+
     /// Player stations as (transit node, cell), ascending node id (deterministic).
     pub fn stations(&self) -> impl Iterator<Item = (NodeId, IVec2)> {
         let mut v: Vec<(NodeId, IVec2)> = self.by_cell.iter().map(|(c, n)| (*n, *c)).collect();
@@ -58,6 +65,12 @@ fn nearest_zone(centres: &[Vec2], p: Vec2) -> Option<usize> {
 /// Returns the commands and the cells that became new stations.
 pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> (Vec<TransitCommand>, Vec<IVec2>) {
     let (agency, mut out, mut fresh) = (cmd.agency, vec![], vec![]);
+    // existing station an extend/platform command refers to (looked up before `node` borrows the map)
+    let known = match &cmd.action {
+        ToolAction::ExtendLine { from, .. } => map.by_cell.get(from).copied(),
+        ToolAction::AddPlatform { cell } => map.by_cell.get(cell).copied(),
+        _ => None,
+    };
     let mut node = |cell: IVec2, out: &mut Vec<TransitCommand>, fresh: &mut Vec<IVec2>| -> NodeId {
         if let Some(n) = map.by_cell.get(&cell) {
             return *n;
@@ -82,6 +95,19 @@ pub fn to_transit(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]) -> 
         }
         ToolAction::PlaceStation { cell } => {
             node(*cell, &mut out, &mut fresh);
+        }
+        ToolAction::AddPlatform { .. } => {
+            if let Some(n) = known {
+                out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
+            }
+        }
+        ToolAction::ExtendLine { line, from, to } => {
+            if let Some(f) = known {
+                let t = node(*to, &mut out, &mut fresh);
+                let len = path_len(&octilinear(from.as_vec2(), to.as_vec2())).max(1.0) as f64;
+                out.push(TransitCommand { agency, action: TransitAction::AddEdge { a: f, b: t, len, kind: EdgeKind::Rail } });
+                out.push(TransitCommand { agency, action: TransitAction::ExtendLine { line: transit::LineId(*line as u32), from: f, to: t } });
+            }
         }
         ToolAction::DrawLine { cells } => {
             let stops: Vec<NodeId> = cells.iter().map(|&c| node(c, &mut out, &mut fresh)).collect();
@@ -136,6 +162,24 @@ impl Lines {
         }
         self.all.retain(|l| l.cells.len() >= 2);
         changed
+    }
+
+    /// Line ids that end (first or last cell) at `cell`.
+    pub fn terminating_at(&self, cell: IVec2) -> Vec<usize> {
+        self.all.iter().filter(|l| l.cells.first() == Some(&cell) || l.cells.last() == Some(&cell)).map(|l| l.id).collect()
+    }
+
+    /// Extend line `id` past its terminus `from` to `to`; false if `from` is not an end.
+    pub fn extend(&mut self, id: usize, from: IVec2, to: IVec2) -> bool {
+        let Some(l) = self.all.iter_mut().find(|l| l.id == id) else { return false };
+        if l.cells.last() == Some(&from) {
+            l.cells.push(to);
+        } else if l.cells.first() == Some(&from) {
+            l.cells.insert(0, to);
+        } else {
+            return false;
+        }
+        true
     }
 }
 
@@ -264,15 +308,33 @@ fn apply_tool_commands(
         }
         let route_len = match &c.action {
             ToolAction::DrawLine { cells } => path_len(&route(cells)) as f64,
+            ToolAction::ExtendLine { from, to, .. } => path_len(&octilinear(from.as_vec2(), to.as_vec2())) as f64,
             _ => 0.0,
         };
-        let amount = STATION_COST * fresh.len() as f64 + COST_PER_LEN * route_len;
+        let platform = if matches!(c.action, ToolAction::AddPlatform { .. }) { PLATFORM_COST } else { 0.0 };
+        let amount = STATION_COST * fresh.len() as f64 + COST_PER_LEN * route_len + platform;
         if amount > 0.0 {
             spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount });
         }
         for cell in fresh {
             let p = cell.as_vec2();
             sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: cell.x / 4 + cell.y / 4, pan: pan(p) });
+        }
+        if let ToolAction::AddPlatform { cell } = &c.action {
+            sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: cell.x / 4 + cell.y / 4 + 2, pan: pan(cell.as_vec2()) });
+        }
+        if let ToolAction::ExtendLine { line, from, to } = &c.action {
+            if lines.extend(*line, *from, *to) {
+                for (e, v) in &line_visuals {
+                    if v.0 == *line {
+                        commands.entity(e).despawn();
+                    }
+                }
+                if let Some(rec) = lines.all.iter().find(|l| l.id == *line) {
+                    spawn_line(&mut commands, &vis, rec);
+                }
+                sound.write(SoundEvent { kind: SoundKind::LineCreated, pitch: *line as i32, pan: pan(to.as_vec2()) });
+            }
         }
         if let ToolAction::DrawLine { cells } = &c.action {
             let id = lines.add(cells.clone());
@@ -393,5 +455,46 @@ mod tests {
         }
         assert_eq!(net.lines.len(), 1);
         assert_eq!(net.lines[0].stops.len(), 2);
+    }
+
+    #[test]
+    fn extending_a_line_adds_station_rail_edge_and_stop() {
+        let centres = [Vec2::ZERO];
+        let mut m = StationMap::new(1);
+        let (a, b, c3) = (IVec2::new(0, 12), IVec2::new(40, 12), IVec2::new(80, 12));
+        let mut net = transit::Network::default();
+        net.apply(&TransitCommand { agency: AgencyId(0), action: TransitAction::AddNode }).unwrap();
+        let (v, _) = to_transit(&cmd(1, ToolAction::DrawLine { cells: vec![a, b] }), &mut m, &centres);
+        for t in &v {
+            net.apply(t).unwrap();
+        }
+        let (e, fresh) = to_transit(&cmd(1, ToolAction::ExtendLine { line: 0, from: b, to: c3 }), &mut m, &centres);
+        assert_eq!(fresh, vec![c3]);
+        for t in &e {
+            net.apply(t).unwrap_or_else(|er| panic!("{t:?}: {er:?}"));
+        }
+        assert_eq!(net.lines[0].stops.len(), 3);
+        // extending from a non-station emits nothing
+        assert!(to_transit(&cmd(1, ToolAction::ExtendLine { line: 0, from: IVec2::new(4, 4), to: c3 }), &mut m, &centres).0.is_empty());
+        let mut lines = Lines::default();
+        lines.add(vec![a, b]);
+        assert_eq!(lines.terminating_at(b), vec![0]);
+        assert!(lines.terminating_at(IVec2::new(9, 9)).is_empty());
+        assert!(lines.extend(0, b, c3) && !lines.extend(0, b, a), "only a terminus extends");
+        assert_eq!(lines.all[0].cells, vec![a, b, c3]);
+        // an end of a line is also a terminus at the other side
+        assert!(lines.extend(0, a, IVec2::new(-40, 12)));
+        assert_eq!(lines.all[0].cells[0], IVec2::new(-40, 12));
+    }
+
+    #[test]
+    fn platform_command_reaches_transit_only_for_real_stations() {
+        let centres = [Vec2::ZERO];
+        let mut m = StationMap::new(1);
+        let cell = IVec2::new(8, 8);
+        assert!(to_transit(&cmd(1, ToolAction::AddPlatform { cell }), &mut m, &centres).0.is_empty());
+        to_transit(&cmd(1, ToolAction::PlaceStation { cell }), &mut m, &centres);
+        let (v, _) = to_transit(&cmd(1, ToolAction::AddPlatform { cell }), &mut m, &centres);
+        assert_eq!(v[0].action, TransitAction::AddPlatform(NodeId(1)));
     }
 }

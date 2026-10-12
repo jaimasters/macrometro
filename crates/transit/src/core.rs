@@ -88,8 +88,13 @@ pub struct Network {
     pub nodes: u32,
     pub edges: Vec<Edge>,
     pub lines: Vec<Line>,
+    /// Platform count per node (missing = 1). Raised by `AddPlatform`; trains need a free platform (C1).
+    pub platforms: Vec<u8>,
     next_line: u32,
 }
+
+/// Most platforms a station can have.
+pub const MAX_PLATFORMS: u8 = 4;
 
 /// Player/agency command (D-8): always tagged with its issuing agency.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +112,10 @@ pub enum TransitAction {
     /// Bulldoze a station: drops every edge touching it and removes it from lines (a line left with <2 stops
     /// is removed; a mid-line removal is bridged by a new rail edge). Node ids stay stable (the node is orphaned).
     RemoveNode(NodeId),
+    /// Extend a line past its terminus `from` to `to` over an existing rail edge (the new end becomes a stop).
+    ExtendLine { line: LineId, from: NodeId, to: NodeId },
+    /// One more platform at a station (up to MAX_PLATFORMS).
+    AddPlatform(NodeId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,6 +129,9 @@ pub enum TransitError {
     TooFewStops,
     UnknownLine(LineId),
     NotOwner,
+    /// `ExtendLine` from a stop that is not an end of the line.
+    NotTerminus(NodeId),
+    MaxPlatforms(NodeId),
 }
 
 impl Line {
@@ -138,6 +150,14 @@ impl Line {
 impl Network {
     pub fn new(params: NetParams) -> Self {
         Self { params, ..Default::default() }
+    }
+
+    pub fn platform_count(&self, n: NodeId) -> u8 {
+        self.platforms.get(n.0 as usize).copied().unwrap_or(1)
+    }
+
+    fn rail_edge(&self, a: NodeId, b: NodeId) -> Option<usize> {
+        self.edges.iter().position(|e| e.kind == EdgeKind::Rail && ((e.a, e.b) == (a, b) || (e.a, e.b) == (b, a)))
     }
 
     fn check(&self, n: NodeId) -> Result<(), TransitError> {
@@ -185,6 +205,38 @@ impl Network {
                     return Err(TransitError::NotOwner);
                 }
                 self.lines.remove(i);
+                Ok(Applied::Removed)
+            }
+            TransitAction::ExtendLine { line, from, to } => {
+                self.check(*from)?;
+                self.check(*to)?;
+                let i = self.lines.iter().position(|l| l.id == *line).ok_or(TransitError::UnknownLine(*line))?;
+                if self.lines[i].owner != c.agency {
+                    return Err(TransitError::NotOwner);
+                }
+                let seg = self.rail_edge(*from, *to).ok_or(TransitError::NoRailEdge(*from, *to))?;
+                let l = &mut self.lines[i];
+                if l.stops.last() == Some(from) {
+                    l.stops.push(*to);
+                    l.segments.push(seg);
+                } else if l.stops.first() == Some(from) {
+                    l.stops.insert(0, *to);
+                    l.segments.insert(0, seg);
+                } else {
+                    return Err(TransitError::NotTerminus(*from));
+                }
+                Ok(Applied::Line(*line))
+            }
+            TransitAction::AddPlatform(n) => {
+                self.check(*n)?;
+                let now = self.platform_count(*n);
+                if now >= MAX_PLATFORMS {
+                    return Err(TransitError::MaxPlatforms(*n));
+                }
+                if self.platforms.len() <= n.0 as usize {
+                    self.platforms.resize(n.0 as usize + 1, 1);
+                }
+                self.platforms[n.0 as usize] = now + 1;
                 Ok(Applied::Removed)
             }
             TransitAction::RemoveNode(n) => {

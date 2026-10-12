@@ -46,6 +46,7 @@ impl Plugin for UiToolsPlugin {
         app.init_resource::<ActiveTool>()
             .init_resource::<ActiveAgency>()
             .init_resource::<LineDrag>()
+            .init_resource::<LineExtend>()
             .init_resource::<Stations>()
             .init_resource::<CursorWorld>()
             .init_resource::<GroundHeight>()
@@ -75,6 +76,8 @@ fn select_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<ActiveTool>, mu
 #[allow(clippy::too_many_arguments)]
 fn pointer(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut extend: ResMut<LineExtend>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform)>>,
     mut tool: ResMut<ActiveTool>,
@@ -97,6 +100,30 @@ fn pointer(
             .filter(|_| !over_ui);
     }
     let hit = cursor_world.0;
+    // Extend / new line from a station (menu): the next map click picks the far end; Esc or right-click cancels.
+    if let Some(mut ex) = extend.0.clone() {
+        if let Some(p) = hit {
+            ex.to = snap_station(&stations.0, p);
+        }
+        let cancel = mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::Escape);
+        if cancel || (mouse.just_pressed(MouseButton::Left) && hit.is_some()) {
+            if !cancel {
+                if let Some(c) = finish_extend(&mut stations, agency.0, &ex) {
+                    out.write(c);
+                }
+            }
+            extend.0 = None;
+            *drag = LineDrag::default();
+            *tool = ActiveTool::Pan; // one-shot
+        } else {
+            let preview = LineDrag { from: Some(ex.from), to: ex.to };
+            if *drag != preview {
+                *drag = preview; // live preview via the line-drag renderer
+            }
+            extend.0 = Some(ex);
+        }
+        return;
+    }
     // Right-click a station: delete it, whatever tool is active.
     if mouse.just_pressed(MouseButton::Right) {
         if let Some(c) = hit.and_then(|p| delete_at(&mut stations, agency.0, p)) {

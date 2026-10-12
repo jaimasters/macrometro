@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod camera;
 mod layout;
 mod roads;
+mod station_menu;
 mod stations;
 mod capture;
 mod hud;
@@ -39,6 +40,7 @@ impl PluginGroup for MacrometroPlugins {
             .add(roads::RoadsPlugin)
             .add(ShellPlugin)
             .add(stations::StationsPlugin)
+            .add(station_menu::StationMenuPlugin)
             .add(sound::SoundPlugin)
             .add(hud::HudPlugin)
             .add(capture::CapturePlugin)
