@@ -2,14 +2,14 @@
 //! out) and the trains running on them, rendered from the transit train sim (interpolated between fixed ticks).
 //! A dwelling train sits on the specific platform bar it occupies.
 use crate::camera::MapCam;
-use crate::shell::{LineRec, Lines, LINE_COLOURS};
+use crate::shell::{line_geometry, LineRec, Lines, RailGeoms, LINE_COLOURS};
 use crate::stations::platform_offset;
 use bevy::prelude::*;
 use sound::{SoundEvent, SoundKind};
 use std::collections::HashMap;
 use transit::trains::{Phase, TrainSim};
 use transit::{LineId, Network, TransitNet};
-use ui_tools::{path_len, route, segment_transform};
+use ui_tools::{path_len, segment_transform};
 
 const Y_LINE: f32 = 2.0;
 const Y_TRAIN: f32 = 4.5;
@@ -145,19 +145,6 @@ fn hop_tracks(net: &Network, rec: &LineRec) -> Vec<u8> {
         .unwrap_or_else(|| vec![2; hops])
 }
 
-/// Index in `path` of each station cell of the line, in order.
-fn stop_indices(path: &[Vec2], cells: &[IVec2]) -> Vec<usize> {
-    let mut from = 0;
-    cells
-        .iter()
-        .map(|c| {
-            let j = path[from..].iter().position(|q| *q == c.as_vec2()).map_or(path.len() - 1, |j| j + from);
-            from = j;
-            j
-        })
-        .collect()
-}
-
 fn stroke(commands: &mut Commands, vis: &Visuals, id: usize, path: &[Vec2], width: f32, y: f32, mat: &Handle<StandardMaterial>, detail: bool) {
     let tag = |e: &mut EntityCommands| {
         if detail {
@@ -181,11 +168,10 @@ fn stroke(commands: &mut Commands, vis: &Visuals, id: usize, path: &[Vec2], widt
     }
 }
 
-fn spawn_line(commands: &mut Commands, vis: &Visuals, rec: &LineRec, tracks: &[u8]) {
+fn spawn_line(commands: &mut Commands, vis: &Visuals, rec: &LineRec, tracks: &[u8], geoms: &RailGeoms) {
     let k = rec.id % vis.lines.len();
-    let path = route(&rec.cells);
+    let (path, idx) = line_geometry(&rec.cells, geoms);
     stroke(commands, vis, rec.id, &path, LINE_WIDTH, Y_LINE, &vis.lines[k], false);
-    let idx = stop_indices(&path, &rec.cells);
     for (h, &n) in tracks.iter().enumerate() {
         let (i0, i1) = (idx[h], idx[h + 1].max(idx[h]));
         let sub = &path[i0..=i1.min(path.len() - 1)];
@@ -202,6 +188,7 @@ fn spawn_line(commands: &mut Commands, vis: &Visuals, rec: &LineRec, tracks: &[u
 fn refresh_lines(
     lines: Res<Lines>,
     net: Res<TransitNet>,
+    geoms: Res<RailGeoms>,
     vis: Option<Res<Visuals>>,
     mut paths: ResMut<LinePaths>,
     mut seen: Local<HashMap<usize, (Vec<IVec2>, Vec<u8>)>>,
@@ -221,7 +208,7 @@ fn refresh_lines(
     for rec in &lines.all {
         let key = (rec.cells.clone(), hop_tracks(&net.0, rec));
         if seen.get(&rec.id) != Some(&key) {
-            paths.0.insert(rec.id, route(&rec.cells));
+            paths.0.insert(rec.id, line_geometry(&rec.cells, &geoms).0);
             redraw.push(rec.id);
             seen.insert(rec.id, key);
         }
@@ -236,7 +223,7 @@ fn refresh_lines(
     }
     for rec in lines.all.iter().filter(|l| redraw.contains(&l.id)) {
         let tracks = seen[&rec.id].1.clone();
-        spawn_line(&mut commands, &vis, rec, &tracks);
+        spawn_line(&mut commands, &vis, rec, &tracks, &geoms);
     }
 }
 
@@ -341,12 +328,15 @@ mod tests {
     }
 
     #[test]
-    fn hops_map_to_path_indices() {
-        let cells = [IVec2::new(0, 0), IVec2::new(40, 12), IVec2::new(80, 12)];
-        let path = route(&cells);
-        let idx = stop_indices(&path, &cells);
+    fn line_geometry_uses_arcs_and_orients_them() {
+        let (a, b, c) = (IVec2::new(0, 0), IVec2::new(40, 0), IVec2::new(80, 0));
+        let mut g = RailGeoms::default();
+        g.0.insert((a, b), vec![Vec2::ZERO, Vec2::new(20.0, 8.0), Vec2::new(40.0, 0.0)]);
+        let (p, idx) = line_geometry(&[c, b, a], &g);
+        assert_eq!(idx.len(), 3);
+        assert_eq!(p[idx[1]], Vec2::new(40.0, 0.0));
+        assert_eq!(p[idx[1] + 1], Vec2::new(20.0, 8.0), "arc is walked b -> a");
+        assert_eq!(p[idx[2]], Vec2::ZERO);
         assert_eq!(idx[0], 0);
-        assert_eq!(path[idx[1]], Vec2::new(40.0, 12.0));
-        assert_eq!(*idx.last().unwrap(), path.len() - 1);
     }
 }

@@ -49,6 +49,9 @@ pub struct RailSave {
     /// (kind index, distance from `from`, road edge)
     pub crossings: Vec<(u8, f64, u32)>,
     pub pts: Vec<(f32, f32)>,
+    /// Curve-radius level (index into the placer's radii).
+    #[serde(default)]
+    pub level: u8,
 }
 
 const KINDS: [CrossingKind; 3] = [CrossingKind::Level, CrossingKind::Bridge, CrossingKind::Underpass];
@@ -225,6 +228,7 @@ impl Collect<'_> {
                     vcap: e.vcap.is_finite().then_some(e.vcap),
                     crossings: e.crossings.iter().map(|c| (KINDS.iter().position(|k| *k == c.kind).unwrap_or(0) as u8, c.at, c.road)).collect(),
                     pts: pts.iter().map(|p| (p.x, p.y)).collect(),
+                    level: self.geoms.1.get(&key).copied().unwrap_or(0),
                 });
             }
         }
@@ -284,6 +288,7 @@ fn restore_game(
             }
             geoms.0.insert(hop_key(from, to), pts);
         }
+        geoms.1.insert(hop_key(from, to), r.level);
     }
     let run = |action: ToolAction, tc: &mut TransitCommands, map: &mut StationMap| {
         tc.0.extend(to_transit_with(&ToolCommand { agency: PLAYER, action }, map, &centres, &hops).0);
@@ -466,7 +471,7 @@ mod tests {
             lines: vec![vec![(0, 12), (40, 12)]],
             platforms: vec![((0, 12), 3), ((40, 12), 1)],
             tracks: vec![((0, 12), (40, 12), 4)],
-            rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)] }],
+            rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)], level: 1 }],
             agencies: vec![AgencySave { id: 1, standing: 0.42, spend: vec![(0, 55.5), (2, 1.0)] }],
         }
     }

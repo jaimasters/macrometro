@@ -2,13 +2,13 @@
 //! white stations with dark outlines, thick coloured octilinear lines, capsule trains.
 use crate::camera::MapCam;
 use crate::zones::{CityPlan, GrowthLink, ZoneLayout};
-use city::placer::{place_track, Ctx, DEFAULT_RADIUS};
+use city::placer::{crossing_upgrade_cost, place_track, Ctx, Placement, DEFAULT_RADIUS, RADII, RAIL_COST_PER_LEN};
 use bevy::prelude::*;
 use economy::{Category, CurrentBudget, Economy, SpendCommand, SpendQueue};
 use sim_core::AgencyId;
 use sound::{SoundEvent, SoundKind};
 use std::collections::HashMap;
-use transit::{Crossing, Edge, EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands, TransitNet};
+use transit::{Crossing, CrossingKind, Edge, EdgeKind, NodeId, RailClass, TransitAction, TransitCommand, TransitCommands, TransitNet};
 use ui_tools::{octilinear, path_len, route, ActiveAgency, ToolAction, ToolCommand};
 
 /// The local player's agency (agency 0 is the city).
@@ -74,9 +74,90 @@ pub fn hop_key(a: IVec2, b: IVec2) -> (IVec2, IVec2) {
     if (a.x, a.y) <= (b.x, b.y) { (a, b) } else { (b, a) }
 }
 
-/// Station-to-station polylines the placer laid (arcs), for drawing and saving.
+/// Station-to-station polylines the placer laid (arcs), and each segment's curve-radius level (index into `RADII`),
+/// for drawing, saving and later upgrades.
 #[derive(Resource, Default)]
-pub struct RailGeoms(pub HashMap<(IVec2, IVec2), Vec<Vec2>>);
+pub struct RailGeoms(pub HashMap<(IVec2, IVec2), Vec<Vec2>>, pub HashMap<(IVec2, IVec2), u8>);
+
+/// The drawn path of a line over its stations (placer arcs where laid, octilinear otherwise) and the index in it of
+/// each station.
+pub fn line_geometry(cells: &[IVec2], geoms: &RailGeoms) -> (Vec<Vec2>, Vec<usize>) {
+    let mut path: Vec<Vec2> = vec![];
+    let mut idx = vec![];
+    for w in cells.windows(2) {
+        let key = hop_key(w[0], w[1]);
+        let mut hop = match geoms.0.get(&key) {
+            Some(g) if g.len() >= 2 => g.clone(),
+            _ => route(&[w[0], w[1]]),
+        };
+        if w[0] != key.0 {
+            hop.reverse();
+        }
+        if path.is_empty() {
+            idx.push(0);
+        } else {
+            hop.remove(0);
+        }
+        path.extend(hop);
+        idx.push(path.len() - 1);
+    }
+    (path, idx)
+}
+
+/// A priced curve upgrade of one segment: the next radius up, re-laid through the same apex.
+pub struct CurveUpgrade {
+    pub placement: Placement,
+    pub level: u8,
+    /// Edge index in the transit net and whether its `a` end is `key.0`'s station.
+    pub edge: usize,
+    pub forward: bool,
+    pub crossings: Vec<Crossing>,
+    /// Charged: eminent domain for what the wider arc sweeps, extra track, and crossings it newly meets.
+    pub cost: f64,
+}
+
+/// Price (and lay out) the next-radius upgrade of the segment a-b; None when maxed, unknown or unplaceable.
+pub fn curve_upgrade(ctx: &Ctx, geoms: &RailGeoms, net: &transit::Network, map: &StationMap, a: IVec2, b: IVec2) -> Option<CurveUpgrade> {
+    let key = hop_key(a, b);
+    let pts = geoms.0.get(&key)?;
+    let level = geoms.1.get(&key).copied().unwrap_or(0) + 1;
+    let radius = *RADII.get(level as usize)?;
+    let (na, nb) = (map.node(key.0)?, map.node(key.1)?);
+    let edge = net.rail_edge(na, nb)?;
+    let e = &net.edges[edge];
+    let (p0, p1) = (key.0.as_vec2(), key.1.as_vec2());
+    let chord = (p1 - p0).normalize_or_zero();
+    // apex = the point of the old path furthest from the straight chord (None if it was straight)
+    let dev = |q: &Vec2| (*q - p0).perp_dot(chord).abs();
+    let apex = pts.iter().copied().max_by(|x, y| dev(x).total_cmp(&dev(y))).filter(|q| dev(q) > 0.5);
+    let placement = place_track(ctx, p0, p1, apex, radius)?;
+    let forward = e.a == na;
+    // crossings already built keep their kind (a bridge stays a bridge); only newly met roads are charged
+    let mut cost = placement.cost.eminent + (placement.len - e.len).max(0.0) * RAIL_COST_PER_LEN;
+    let crossings: Vec<Crossing> = placement
+        .crossings
+        .iter()
+        .zip(&placement.crossing_costs)
+        .map(|(c, price)| {
+            let old = (c.road != u32::MAX).then(|| e.crossings.iter().find(|o| o.road == c.road)).flatten();
+            if old.is_none() {
+                cost += price;
+            }
+            let at = if forward { c.at } else { placement.len - c.at };
+            Crossing { kind: old.map_or(c.kind, |o| o.kind), at, road: c.road }
+        })
+        .collect();
+    Some(CurveUpgrade { placement, level, edge, forward, crossings, cost })
+}
+
+/// Grade-separating every level crossing on segment a-b: (edge, [(crossing index, kind)], cost).
+pub fn crossing_upgrades(net: &transit::Network, map: &StationMap, a: IVec2, b: IVec2, underpass: bool) -> Option<(usize, Vec<(usize, CrossingKind)>, f64)> {
+    let edge = net.rail_edge(map.node(a)?, map.node(b)?)?;
+    let to = if underpass { CrossingKind::Underpass } else { CrossingKind::Bridge };
+    let ups: Vec<(usize, CrossingKind)> = net.edges[edge].crossings.iter().enumerate().filter(|(_, c)| c.kind == CrossingKind::Level).map(|(i, _)| (i, to)).collect();
+    let cost = ups.len() as f64 * crossing_upgrade_cost(CrossingKind::Level, to)?;
+    (!ups.is_empty()).then_some((edge, ups, cost))
+}
 
 /// Zones razed so far by eminent domain (indexed by zone).
 #[derive(Resource, Default)]
@@ -144,6 +225,8 @@ pub fn to_transit_with(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]
                 out.push(TransitCommand { agency, action: TransitAction::UpgradeTracks { a: na, b: nb } });
             }
         }
+        // upgrades that need the live net/city are applied in `apply_tool_commands`
+        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } => {}
         ToolAction::AddPlatform { .. } => {
             if let Some(n) = known {
                 out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
@@ -268,6 +351,43 @@ fn apply_tool_commands(
     let centres: Vec<Vec2> = layout.0.iter().map(|g| g.center).collect();
     let pan = |p: Vec2| cam.as_ref().map_or(0.0, |c| ((p.x - c.focus.x) / c.view_h).clamp(-1.0, 1.0));
     for c in cmds.read() {
+        match &c.action {
+            ToolAction::UpgradeCrossings { a, b, underpass } => {
+                if let Some((edge, ups, cost)) = crossing_upgrades(&net.0, &map, *a, *b, *underpass) {
+                    for (idx, kind) in ups {
+                        transit.0.push(TransitCommand { agency: c.agency, action: TransitAction::UpgradeCrossing { edge, idx, kind } });
+                    }
+                    spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount: cost });
+                    sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: a.x / 4 + a.y / 4 + 6, pan: pan(a.as_vec2()) });
+                }
+                continue;
+            }
+            ToolAction::UpgradeCurve { a, b } => {
+                let snap = link.snapshots.latest();
+                razed.0.resize(cp.plan.parcels.len(), false);
+                let land = |p: Vec2| city::is_land(seed.0, p);
+                let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &razed.0, land: &land };
+                let Some(u) = curve_upgrade(&ctx, &geoms, &net.0, &map, *a, *b) else { continue };
+                let key = hop_key(*a, *b);
+                transit.0.push(TransitCommand {
+                    agency: c.agency,
+                    action: TransitAction::SetCurve { edge: u.edge, len: u.placement.len.max(1.0), vcap: u.placement.vcap, crossings: u.crossings.clone() },
+                });
+                for &z in &u.placement.demolition.zones {
+                    razed.0[z] = true;
+                }
+                link.shared.demolish.lock().unwrap().extend(u.placement.demolition.zones.iter().copied());
+                if let Some(ag) = eco.0.agencies.get_mut(&c.agency) {
+                    ag.standing = (ag.standing - u.placement.demolition.standing).max(0.0);
+                }
+                geoms.0.insert(key, u.placement.pts.clone());
+                geoms.1.insert(key, u.level);
+                spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount: u.cost });
+                sound.write(SoundEvent { kind: SoundKind::StationPlaced, pitch: a.x / 4 + a.y / 4 + 5, pan: pan(a.as_vec2()) });
+                continue;
+            }
+            _ => {}
+        }
         // a track upgrade is priced from the segment itself; a maxed or unknown segment is refused outright
         let track_cost = if let ToolAction::UpgradeTracks { a, b } = &c.action {
             match map.node(*a).zip(map.node(*b)).and_then(|(na, nb)| Edge::track_cost_between(&net.0, na, nb)) {
@@ -317,6 +437,7 @@ fn apply_tool_commands(
                     pts.reverse();
                 }
                 geoms.0.insert(key, pts);
+                geoms.1.remove(&key);
                 hops.insert(key, Some(HopPlan { from: c0, len: p.len.max(1.0), vcap: p.vcap, crossings: p.crossings.clone() }));
             }
             if refused {

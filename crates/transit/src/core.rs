@@ -160,8 +160,8 @@ pub enum TransitAction {
     UpgradeTracks { a: NodeId, b: NodeId },
     /// Replace a crossing's kind (level -> bridge/underpass).
     UpgradeCrossing { edge: usize, idx: usize, kind: CrossingKind },
-    /// Rebuild an edge's curve: new length and speed cap.
-    SetCurve { edge: usize, len: f64, vcap: f64 },
+    /// Rebuild an edge's curve: new length, speed cap and the crossings along the new path.
+    SetCurve { edge: usize, len: f64, vcap: f64, crossings: Vec<Crossing> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -341,12 +341,12 @@ impl Network {
                 cr.kind = *kind;
                 Ok(Applied::Edge(*edge))
             }
-            TransitAction::SetCurve { edge, len, vcap } => {
+            TransitAction::SetCurve { edge, len, vcap, crossings } => {
                 if !len.is_finite() || *len <= 0.0 {
                     return Err(TransitError::BadLength);
                 }
                 let e = self.edges.get_mut(*edge).filter(|e| e.kind == EdgeKind::Rail).ok_or(TransitError::NoEdge(*edge))?;
-                (e.len, e.vcap) = (*len, *vcap);
+                (e.len, e.vcap, e.crossings) = (*len, *vcap, crossings.clone());
                 Ok(Applied::Edge(*edge))
             }
             TransitAction::RemoveNode(n) => {

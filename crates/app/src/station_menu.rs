@@ -4,9 +4,10 @@
 use crate::camera::MapCam;
 use crate::hud::ui_font;
 use crate::layout::station_name;
-use crate::shell::{line_colour, Lines, StationMap, PLATFORM_COST};
+use crate::shell::{crossing_upgrades, curve_upgrade, line_colour, Lines, RailGeoms, Razed, StationMap, PLATFORM_COST};
 use crate::stations::SelectedStation;
-use crate::zones::{GrowthLink, ZoneLayout};
+use crate::zones::{CityPlan, GrowthLink, ZoneLayout};
+use city::placer::Ctx;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use transit::{Edge, TransitNet, MAX_PLATFORMS};
@@ -30,6 +31,10 @@ enum MenuAction {
     Platform,
     /// +1 track on the segment to the neighbouring station on this cell.
     Track(IVec2),
+    /// Next curve radius up on the segment to this neighbour.
+    Curve(IVec2),
+    /// Bridge every level crossing on the segment to this neighbour.
+    Crossings(IVec2),
     Delete,
     Close,
 }
@@ -67,7 +72,7 @@ pub fn neighbours(lines: &Lines, cell: IVec2) -> Vec<IVec2> {
 
 /// Menu rows for a station: (action, label) in display order. `tracks` = (neighbour, label) for each segment
 /// that can still take a track (priced by the caller from the transit net).
-pub fn menu_actions(lines: &Lines, platforms: u8, cell: IVec2, tracks: &[(IVec2, String)]) -> Vec<(MenuActionKind, String)> {
+pub fn menu_actions(lines: &Lines, platforms: u8, cell: IVec2, tracks: &[(IVec2, String)], upgrades: &[(MenuActionKind, String)]) -> Vec<(MenuActionKind, String)> {
     let mut v: Vec<(MenuActionKind, String)> =
         lines.terminating_at(cell).into_iter().map(|l| (MenuActionKind::Extend(l), format!("Extend line {} from here", l + 1))).collect();
     v.push((MenuActionKind::NewLine, "New line from here".into()));
@@ -75,6 +80,7 @@ pub fn menu_actions(lines: &Lines, platforms: u8, cell: IVec2, tracks: &[(IVec2,
         v.push((MenuActionKind::Platform, format!("+ Platform  ({PLATFORM_COST:.0})")));
     }
     v.extend(tracks.iter().map(|(n, label)| (MenuActionKind::Track(*n), label.clone())));
+    v.extend(upgrades.iter().cloned());
     v.push((MenuActionKind::Delete, "Delete station".into()));
     v
 }
@@ -86,6 +92,8 @@ pub enum MenuActionKind {
     NewLine,
     Platform,
     Track(IVec2),
+    Curve(IVec2),
+    Crossings(IVec2),
     Delete,
 }
 
@@ -96,6 +104,8 @@ impl From<MenuActionKind> for MenuAction {
             MenuActionKind::NewLine => MenuAction::NewLine,
             MenuActionKind::Platform => MenuAction::Platform,
             MenuActionKind::Track(n) => MenuAction::Track(n),
+            MenuActionKind::Curve(n) => MenuAction::Curve(n),
+            MenuActionKind::Crossings(n) => MenuAction::Crossings(n),
             MenuActionKind::Delete => MenuAction::Delete,
         }
     }
@@ -121,10 +131,14 @@ fn rebuild_menu(
     map: Res<StationMap>,
     layout: Res<ZoneLayout>,
     seed: Res<world_gen::WorldSeed>,
+    cp: Res<CityPlan>,
+    link: Res<GrowthLink>,
+    razed: Res<Razed>,
+    geoms: Res<RailGeoms>,
     old: Query<Entity, With<MenuRoot>>,
     mut commands: Commands,
 ) {
-    if !(sel.is_changed() || lines.is_changed() || net.is_changed()) {
+    if !(sel.is_changed() || lines.is_changed() || net.is_changed() || geoms.is_changed()) {
         return;
     }
     for e in &old {
@@ -174,7 +188,24 @@ fn rebuild_menu(
                     Some((n, format!("+ Track to {}  ({cost:.0}, now {now})", station_name(seed.0, &layout.0, n.as_vec2()))))
                 })
                 .collect();
-            for (k, text) in menu_actions(&lines, platforms, cell, &tracks) {
+            // curve and crossing upgrades, priced from the live city (eminent domain on what a wider arc sweeps)
+            let snap = link.snapshots.latest();
+            let gone: Vec<bool> = (0..cp.plan.parcels.len()).map(|i| razed.0.get(i).copied().unwrap_or(false)).collect();
+            let land = |p: Vec2| city::is_land(seed.0, p);
+            let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &gone, land: &land };
+            let mut upgrades: Vec<(MenuActionKind, String)> = vec![];
+            for n in neighbours(&lines, cell) {
+                let to = station_name(seed.0, &layout.0, n.as_vec2());
+                if let Some(u) = curve_upgrade(&ctx, &geoms, &net.0, &map, cell, n) {
+                    let hit = u.placement.demolition.zones.len();
+                    let razing = if hit > 0 { format!(", razes {hit}") } else { String::new() };
+                    upgrades.push((MenuActionKind::Curve(n), format!("Wider curve to {to}  ({:.0}{razing})", u.cost)));
+                }
+                if let Some((_, ups, cost)) = crossing_upgrades(&net.0, &map, cell, n, false) {
+                    upgrades.push((MenuActionKind::Crossings(n), format!("Bridge {} crossing(s) to {to}  ({cost:.0})", ups.len())));
+                }
+            }
+            for (k, text) in menu_actions(&lines, platforms, cell, &tracks, &upgrades) {
                 button(m, k.into(), &text);
             }
         });
@@ -262,6 +293,12 @@ fn menu_clicks(
         MenuAction::Track(other) => {
             out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeTracks { a: cell, b: other } });
         }
+        MenuAction::Curve(other) => {
+            out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeCurve { a: cell, b: other } });
+        }
+        MenuAction::Crossings(other) => {
+            out.write(ToolCommand { agency: agency.0, action: ToolAction::UpgradeCrossings { a: cell, b: other, underpass: false } });
+        }
         MenuAction::Delete => {
             stations.0.retain(|s| *s != cell);
             out.write(ToolCommand { agency: agency.0, action: ToolAction::DeleteStation { cell } });
@@ -281,13 +318,14 @@ mod tests {
         let (a, b, c) = (IVec2::new(0, 0), IVec2::new(40, 0), IVec2::new(80, 0));
         let mut lines = Lines::default();
         lines.add(vec![a, b, c]);
-        let labels = |cell, plats| menu_actions(&lines, plats, cell, &[]).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        let labels = |cell, plats| menu_actions(&lines, plats, cell, &[], &[]).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
         assert_eq!(labels(a, 1), vec![MenuActionKind::Extend(0), MenuActionKind::NewLine, MenuActionKind::Platform, MenuActionKind::Delete]);
         assert_eq!(labels(b, 1), vec![MenuActionKind::NewLine, MenuActionKind::Platform, MenuActionKind::Delete], "mid-line stop: no extend");
         assert!(!labels(c, MAX_PLATFORMS).contains(&MenuActionKind::Platform));
         assert_eq!(lines_serving(&lines, b), vec![0]);
         assert_eq!(neighbours(&lines, b), vec![a, c]);
-        let row = menu_actions(&lines, 1, b, &[(c, "+ Track".into())]);
+        let row = menu_actions(&lines, 1, b, &[(c, "+ Track".into())], &[(MenuActionKind::Curve(c), "Wider curve".into())]);
+        assert!(row.iter().any(|(k, _)| *k == MenuActionKind::Curve(c)));
         assert!(row.iter().any(|(k, _)| *k == MenuActionKind::Track(c)));
         assert!(lines_serving(&lines, IVec2::new(1, 1)).is_empty());
     }

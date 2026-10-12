@@ -28,6 +28,10 @@ pub enum ToolAction {
     AddPlatform { cell: IVec2 },
     /// One more track on the rail segment between two stations (1 -> 2 -> 4).
     UpgradeTracks { a: IVec2, b: IVec2 },
+    /// Re-lay the segment between two stations on the next larger curve radius (faster; razes what the arc sweeps).
+    UpgradeCurve { a: IVec2, b: IVec2 },
+    /// Grade-separate every level crossing on the segment (bridge, or underpass).
+    UpgradeCrossings { a: IVec2, b: IVec2, underpass: bool },
 }
 
 /// A player command, always tagged with the acting agency (D-8).
