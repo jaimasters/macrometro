@@ -12,6 +12,7 @@ mod stations;
 mod capture;
 mod hud;
 mod persist;
+mod preview;
 pub mod shell;
 mod terrain;
 mod zones;
@@ -43,6 +44,7 @@ impl PluginGroup for MacrometroPlugins {
             .add(roads::RoadsPlugin)
             .add(ShellPlugin)
             .add(rails::RailsPlugin)
+            .add(preview::PreviewPlugin)
             .add(stations::StationsPlugin)
             .add(station_menu::StationMenuPlugin)
             .add(sound::SoundPlugin)

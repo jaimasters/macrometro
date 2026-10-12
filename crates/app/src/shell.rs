@@ -325,7 +325,7 @@ impl Plugin for ShellPlugin {
 
 /// Where the player's drag bulges away from the straight line between two stations (the octilinear route's bend):
 /// the placer goes round that side.
-fn steer_point(a: IVec2, b: IVec2) -> Option<Vec2> {
+pub fn steer_point(a: IVec2, b: IVec2) -> Option<Vec2> {
     let (pa, pb) = (a.as_vec2(), b.as_vec2());
     let chord = pb - pa;
     let n = Vec2::new(-chord.y, chord.x).normalize_or_zero();
