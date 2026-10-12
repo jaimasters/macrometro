@@ -31,7 +31,7 @@ pub fn line_colour(id: usize) -> Color {
 #[derive(Resource)]
 pub struct StationMap {
     next: u32,
-    by_cell: HashMap<IVec2, NodeId>,
+    pub by_cell: HashMap<IVec2, NodeId>,
 }
 
 impl StationMap {

@@ -226,8 +226,8 @@ fn button(parent: &mut ChildSpawnerCommands, action: MenuAction, text: &str) {
 fn update_menu(
     cam: Option<Res<MapCam>>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<Camera3d>>>,
-    layout: Res<ZoneLayout>,
-    link: Res<GrowthLink>,
+    map: Res<StationMap>,
+    trains: Res<crate::rails::Trains>,
     mut roots: Query<(&MenuRoot, &mut Node)>,
     mut waiting: Query<&mut Text, With<WaitingText>>,
     mut buttons: Query<(&Hovered, &mut BackgroundColor), With<MenuButton>>,
@@ -241,7 +241,6 @@ fn update_menu(
     if roots.is_empty() {
         return;
     }
-    let s = link.snapshots.latest();
     let (Some(_), Some(camera)) = (cam, camera) else { return };
     let (camera, tf) = *camera;
     for (r, mut node) in &mut roots {
@@ -250,9 +249,8 @@ fn update_menu(
             node.left = Val::Px(v.x + 26.0);
             node.top = Val::Px((v.y - 30.0).max(8.0));
         }
-        let zones: Vec<(Vec2, f32, f32)> =
-            layout.0.iter().enumerate().map(|(i, g)| (g.center, s.pop.get(i).copied().unwrap_or(0.0), s.zone_share.get(i).copied().unwrap_or(0.0))).collect();
-        let line = format!("Waiting ~{}", waiting_estimate(p, &zones));
+        let n = map.node(r.0).map_or(0.0, |n| trains.0.waiting_at(n));
+        let line = format!("Waiting {}", n.round() as u32);
         for mut t in &mut waiting {
             if t.0 != line {
                 t.0 = line.clone();

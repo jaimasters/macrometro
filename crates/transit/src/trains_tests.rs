@@ -301,3 +301,23 @@ fn opposing_trains_share_a_single_track_and_meet_at_station_loops_without_deadlo
     assert!(s.trains.len() >= 2, "several trains share the line");
     assert!(went_back && reached_end, "trains complete the out-and-back run: no deadlock");
 }
+
+#[test]
+fn passengers_wait_board_up_to_capacity_and_get_off() {
+    let net = line_net(3, 100.0, 2, RailClass::LightRail);
+    let mut s = TrainSim::default();
+    s.arrivals.insert(0, 1.0); // a person a second at the first station
+    let mut peak: f64 = 0.0;
+    let mut mid_gain = false;
+    for _ in 0..(400.0 / DT) as u64 {
+        s.step(&net);
+        for t in &s.trains {
+            peak = peak.max(t.load);
+            assert!(t.load <= TRAIN_CAPACITY + 1e-9 && t.load >= 0.0);
+            mid_gain |= t.k == 1 && t.load > 0.0 && matches!(t.phase, Phase::Dwell(_));
+        }
+    }
+    assert!(peak > 5.0, "riders board at the origin: {peak}");
+    assert!(mid_gain, "load survives into the next stop");
+    assert!(s.waiting_at(NodeId(0)) < 400.0, "boarding drains the queue");
+}
