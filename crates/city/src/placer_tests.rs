@@ -144,3 +144,16 @@ fn track_leaves_every_station_straight_before_it_bends() {
     assert!((pts[1] - a).normalize().dot((w - a).normalize()) > 0.999);
 }
 
+#[test]
+fn a_track_continues_straight_out_of_a_station_along_the_arriving_axis() {
+    use bevy::math::Vec2;
+    let plan = TownPlan { parcels: vec![], graph: RoadGraph::default(), towns: vec![] };
+    let built: Vec<bool> = vec![];
+    let land = |_: Vec2| true;
+    let ctx = Ctx { plan: &plan, built: &built, pop: &[], gone: &[], land: &land };
+    let a = Vec2::ZERO;
+    let p = place_departing(&ctx, a, Vec2::new(60.0, 50.0), Vec2::X, DEFAULT_RADIUS).expect("a bend exists");
+    assert!((p.pts[1] - a).normalize().dot(Vec2::X) > 0.999, "first leg is along the arriving axis");
+    assert!(p.pts[1].distance(a) >= STATION_LEAD - 1e-3);
+}
+
