@@ -55,7 +55,7 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 
 | # | Item | Status | Owner | Merge batch |
 |---|------|--------|-------|-------------|
-<<<<<<< HEAD
+| 0 | TOP (regression): left-hand rule on roundabouts — clockwise ring, give way to ring traffic from right, enter/exit left lane; junctions + straights keep left; headless test | in progress, top | presets worker (mgr-roads) | B2 |
 | 1 | Road spacing: min junction spacing per class, min road length, merge close junctions, roads only on demand, roundabout only if ring clears; spacing/overlap test | next | presets worker | B2 |
 | 2 | R42 (c) traffic-driven roads | later | presets worker | B3 |
 | 3 | R42 (d) freeways + overpass drawing; upgrades re-align with eminent domain | later | presets worker | B3 |
@@ -63,17 +63,4 @@ Rule: update a row in the same commit as the work that changes it. Managers own 
 | 5 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
 | 6 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
 | 7 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
-=======
-| 1 | R43 wire reset menu to plan_preset (persist.rs) | in progress | presets worker (mgr-roads) | B2 |
-| 2 | Road spacing: min junction spacing per class, min road length, merge close junctions, roads only on demand, roundabout only if ring clears; spacing/overlap test | next | presets worker | B2 |
-| 3 | Asphalt colour ramp by class (light surface to darkest interstate), everywhere incl. rings/zoomed-out; strictly-darker test | next | presets worker | B2 |
-| 4 | organic.rs unused-variable warnings | next | presets worker | B2 |
-| 5 | R42 (c) traffic-driven roads | later | presets worker | B3 |
-| 6 | R42 (d) freeways + overpass drawing; upgrades re-align with eminent domain | later | presets worker | B3 |
-| 7 | R39 remainder: new lines through existing stations; re-lay existing lines | later | unassigned | B3 |
-| 8 | R38 remainder: idle trains return to sidings; sidings beyond first stop | later | unassigned | B3 |
-| 9 | Roundabout discs (grey+green, roads.rs ~405) overlap: fix via item 5 spacing + ring-clear rule; draw as one opaque layer | next | presets worker | B2 |
-| 10 | Check on-screen stroke width at far zoom (marks/track) | next | presets worker | B2 |
-| 11 | TOP (regression): left-hand rule on roundabouts — clockwise ring, give way to ring traffic from right, enter/exit left lane; junctions + straights keep left; headless test | in progress, top | presets worker (mgr-roads) | B2 |
->>>>>>> c545851bafb98e3ce342e4779a7241bd3ffee6e3
 
