@@ -1,0 +1,12 @@
+[package]
+name = "city"
+version = "0.1.0"
+edition.workspace = true
+description = "Procedural town roads, land use, road growth, traffic and mode choice (pure Rust)."
+
+[dependencies]
+bevy.workspace = true
+world_gen = { path = "../world_gen" }
+growth = { path = "../growth" }
+transit = { path = "../transit" }
+sim_core = { path = "../sim_core" }
