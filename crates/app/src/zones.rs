@@ -100,6 +100,8 @@ pub struct Shared {
     pub closure: Mutex<Vec<f32>>,
     /// Zones demolished by the player (eminent domain), drained by the sim.
     pub demolish: Mutex<Vec<usize>>,
+    /// Lane-class changes (edge, class index into `LANE_CLASSES`), drained by the sim.
+    pub lanes: Mutex<Vec<(usize, u8)>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,6 +215,11 @@ impl Simulation for GrowthSimulation {
         let n = self.sim.zones.0.len();
         let razed = std::mem::take(&mut *self.shared.demolish.lock().unwrap());
         self.demolish(&razed);
+        for (e, c) in std::mem::take(&mut *self.shared.lanes.lock().unwrap()) {
+            if e < self.plan.graph.edges.len() {
+                self.traffic.set_lane_class(e, city::lanes::LANE_CLASSES[(c as usize).min(6)]);
+            }
+        }
         let transit = self.shared.transit.lock().unwrap().clone();
         // Transit service gates the pace: no service => CAR_ONLY_GROWTH of the rate, full service => all of it.
         let mean_share = self.traffic.out.transit_share().clamp(0.0, 1.0);

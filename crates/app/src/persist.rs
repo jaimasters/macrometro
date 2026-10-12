@@ -2,7 +2,7 @@
 //! the player and the sim changed: zone growth, built/queued roads, stations, lines, platforms, tracks and money.
 //! Autosaves every 30 s and on exit; a missing, unreadable, wrong-version or other-seed save means a fresh game.
 //! Reset (button + confirm) deletes the save and relaunches.
-use crate::shell::{hop_key, to_transit_with, HopPlan, Hops, Lines, RailGeoms, Razed, StationMap, PLAYER};
+use crate::shell::{hop_key, to_transit_with, HopPlan, Hops, Lines, RailGeoms, Razed, RoadClasses, StationMap, PLAYER};
 use crate::zones::{GrowthLink, ZoneLayout};
 use bevy::ecs::system::SystemParam;
 use bevy::picking::hover::Hovered;
@@ -70,6 +70,9 @@ pub struct GameSave {
     /// Placer results per segment (older saves have none: segments are laid straight).
     #[serde(default)]
     pub rails: Vec<RailSave>,
+    /// Upgraded road lane classes (edge, class index).
+    #[serde(default)]
+    pub lanes: Vec<(u32, u8)>,
     pub agencies: Vec<AgencySave>,
 }
 
@@ -192,6 +195,7 @@ struct Collect<'w> {
     net: Res<'w, TransitNet>,
     eco: Res<'w, Economy>,
     geoms: Res<'w, RailGeoms>,
+    classes: Res<'w, RoadClasses>,
 }
 
 impl Collect<'_> {
@@ -246,6 +250,7 @@ impl Collect<'_> {
             platforms: self.stations.0.iter().filter_map(|c| Some((xy(c), self.net.0.platform_count(self.map.node(*c)?)))).collect(),
             tracks,
             rails,
+            lanes: { let mut v: Vec<(u32, u8)> = self.classes.0.iter().map(|(e, c)| (*e as u32, *c as u8)).collect(); v.sort(); v },
             agencies: self
                 .eco
                 .0
@@ -269,8 +274,14 @@ fn restore_game(
     mut eco: ResMut<Economy>,
     mut geoms: ResMut<RailGeoms>,
     mut razed: ResMut<Razed>,
+    mut classes: ResMut<RoadClasses>,
+    link: Res<crate::zones::GrowthLink>,
 ) {
     let Some(g) = &loaded.0 else { return };
+    for &(e, c) in &g.lanes {
+        classes.0.insert(e as usize, city::lanes::LANE_CLASSES[(c as usize).min(6)]);
+        link.shared.lanes.lock().unwrap().push((e as usize, c));
+    }
     razed.0 = vec![false; layout.0.len()];
     for &z in &g.growth.gone {
         if let Some(r) = razed.0.get_mut(z) {
@@ -475,6 +486,7 @@ mod tests {
             lines: vec![vec![(0, 12), (40, 12)]],
             platforms: vec![((0, 12), 3), ((40, 12), 1)],
             tracks: vec![((0, 12), (40, 12), 4)],
+            lanes: vec![(2, 3)],
             rails: vec![RailSave { from: (0, 12), to: (40, 12), len: 41.5, vcap: Some(6.3), crossings: vec![(0, 20.0, 3)], pts: vec![(0.0, 12.0), (40.0, 12.0)], level: 1 }],
             agencies: vec![AgencySave { id: 1, standing: 0.42, spend: vec![(0, 55.5), (2, 1.0)] }],
         }

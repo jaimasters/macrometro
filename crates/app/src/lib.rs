@@ -7,12 +7,13 @@ mod camera;
 mod layout;
 mod rails;
 mod roads;
-mod station_menu;
+pub mod station_menu;
 mod stations;
 mod capture;
 mod hud;
 mod persist;
 mod preview;
+mod segment_menu;
 pub mod shell;
 mod terrain;
 mod zones;
@@ -47,6 +48,7 @@ impl PluginGroup for MacrometroPlugins {
             .add(preview::PreviewPlugin)
             .add(stations::StationsPlugin)
             .add(station_menu::StationMenuPlugin)
+            .add(segment_menu::SegmentMenuPlugin)
             .add(sound::SoundPlugin)
             .add(hud::HudPlugin)
             .add(persist::PersistPlugin)

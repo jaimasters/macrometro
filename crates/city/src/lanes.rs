@@ -31,7 +31,15 @@ const LANE_W: f32 = 0.9;
 /// Cost per world unit of road length per lane added.
 pub const LANE_COST_PER_LEN: f64 = 1.2;
 
+/// The class every generated road starts as.
+pub fn default_class(c: crate::roadgen::RoadClass) -> LaneClass {
+    if c == crate::roadgen::RoadClass::Arterial { LaneClass::TwoLaneHigh } else { LaneClass::TwoLaneLow }
+}
+
 impl LaneClass {
+    pub fn name(self) -> &'static str {
+        ["street", "2-lane", "2-lane fast", "4-lane", "6-lane freeway", "8-lane freeway", "10-lane freeway"][self as usize]
+    }
     pub fn lanes(self) -> u32 {
         [1, 2, 2, 4, 6, 8, 10][self as usize]
     }
@@ -41,7 +49,7 @@ impl LaneClass {
     }
     /// Vehicles per hour: ~ 150 per lane, a shared street lane carries less.
     pub fn capacity(self) -> f64 {
-        [120.0, 300.0, 450.0, 1000.0, 1700.0, 2400.0, 3100.0][self as usize]
+        [120.0, 300.0, 900.0, 1400.0, 2000.0, 2600.0, 3200.0][self as usize]
     }
     /// Corridor width (lanes plus a freeway median from 6 lanes up).
     pub fn width(self) -> f32 {

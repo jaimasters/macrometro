@@ -29,6 +29,8 @@ pub enum ToolAction {
     /// One more track on the rail segment between two stations (1 -> 2 -> 4).
     UpgradeTracks { a: IVec2, b: IVec2 },
     /// Re-lay the segment between two stations on the next larger curve radius (faster; razes what the arc sweeps).
+    /// Widen a city road to the next lane class (R24).
+    UpgradeRoad { edge: usize },
     UpgradeCurve { a: IVec2, b: IVec2 },
     /// Grade-separate every level crossing on the segment (bridge, or underpass).
     UpgradeCrossings { a: IVec2, b: IVec2, underpass: bool },

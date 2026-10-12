@@ -162,6 +162,18 @@ pub fn crossing_upgrades(net: &transit::Network, map: &StationMap, a: IVec2, b: 
     (!ups.is_empty()).then_some((edge, ups, cost))
 }
 
+/// Lane class per road edge the player has upgraded (absent = the generated default).
+#[derive(Resource, Default)]
+pub struct RoadClasses(pub HashMap<usize, city::lanes::LaneClass>);
+
+/// Next-class widening of road `e`: lane + eminent-domain price and the zones it razes.
+pub fn road_upgrade(ctx: &Ctx, classes: &RoadClasses, e: usize) -> Option<city::lanes::LaneUpgrade> {
+    let ed = ctx.plan.graph.edges.get(e)?;
+    let from = classes.0.get(&e).copied().unwrap_or_else(|| city::lanes::default_class(ed.class));
+    let strip = [ctx.plan.graph.nodes[ed.a as usize], ctx.plan.graph.nodes[ed.b as usize]];
+    city::lanes::upgrade(ctx.plan, ctx.pop, ctx.gone, &strip, ed.len, from)
+}
+
 /// Zones razed so far by eminent domain (indexed by zone).
 #[derive(Resource, Default)]
 pub struct Razed(pub Vec<bool>);
@@ -229,7 +241,7 @@ pub fn to_transit_with(cmd: &ToolCommand, map: &mut StationMap, centres: &[Vec2]
             }
         }
         // upgrades that need the live net/city are applied in `apply_tool_commands`
-        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } => {}
+        ToolAction::UpgradeCurve { .. } | ToolAction::UpgradeCrossings { .. } | ToolAction::UpgradeRoad { .. } => {}
         ToolAction::AddPlatform { .. } => {
             if let Some(n) = known {
                 out.push(TransitCommand { agency, action: TransitAction::AddPlatform(n) });
@@ -317,6 +329,7 @@ impl Plugin for ShellPlugin {
         app.insert_resource(StationMap::new(first_free))
             .init_resource::<Lines>()
             .init_resource::<RailGeoms>()
+            .init_resource::<RoadClasses>()
             .init_resource::<Razed>()
             .insert_resource(ActiveAgency(PLAYER))
             .add_systems(Update, apply_tool_commands);
@@ -347,6 +360,7 @@ fn apply_tool_commands(
     seed: Res<world_gen::WorldSeed>,
     mut razed: ResMut<Razed>,
     mut geoms: ResMut<RailGeoms>,
+    mut classes: ResMut<RoadClasses>,
     mut eco: ResMut<Economy>,
     mut spend: ResMut<SpendQueue>,
     mut sound: MessageWriter<SoundEvent>,
@@ -355,6 +369,24 @@ fn apply_tool_commands(
     let pan = |p: Vec2| cam.as_ref().map_or(0.0, |c| ((p.x - c.focus.x) / c.view_h).clamp(-1.0, 1.0));
     for c in cmds.read() {
         match &c.action {
+            ToolAction::UpgradeRoad { edge } => {
+                let snap = link.snapshots.latest();
+                razed.0.resize(cp.plan.parcels.len(), false);
+                let land = |p: Vec2| city::is_land(seed.0, p);
+                let ctx = Ctx { plan: &cp.plan, built: &snap.built, pop: &snap.pop, gone: &razed.0, land: &land };
+                let Some(u) = road_upgrade(&ctx, &classes, *edge) else { continue };
+                for &z in &u.demolition.zones {
+                    razed.0[z] = true;
+                }
+                link.shared.demolish.lock().unwrap().extend(u.demolition.zones.iter().copied());
+                link.shared.lanes.lock().unwrap().push((*edge, u.to as u8));
+                classes.0.insert(*edge, u.to);
+                if let Some(ag) = eco.0.agencies.get_mut(&c.agency) {
+                    ag.standing = (ag.standing - u.demolition.standing).max(0.0);
+                }
+                spend.0.push(SpendCommand { agency: c.agency, category: Category::Construction, amount: u.cost });
+                continue;
+            }
             ToolAction::UpgradeCrossings { a, b, underpass } => {
                 if let Some((edge, ups, cost)) = crossing_upgrades(&net.0, &map, *a, *b, *underpass) {
                     for (idx, kind) in ups {
@@ -650,5 +682,22 @@ mod tests {
             net.apply(&TransitCommand { agency: AgencyId(1), action: TransitAction::UpgradeCrossing { edge, idx, kind } }).unwrap();
         }
         assert!(crossing_upgrades(&net, &m, a, b, true).is_none(), "nothing left to separate");
+    }
+
+    #[test]
+    fn road_upgrade_steps_through_classes_and_is_priced() {
+        let plan = city::plan_towns(7, &world_gen::generate_cities(7, 3)[..2]);
+        let pop = vec![0.0f32; plan.parcels.len()];
+        let gone = vec![false; plan.parcels.len()];
+        let built = vec![true; plan.graph.edges.len()];
+        let land = |_: Vec2| true;
+        let ctx = Ctx { plan: &plan, built: &built, pop: &pop, gone: &gone, land: &land };
+        let mut classes = RoadClasses::default();
+        let first = road_upgrade(&ctx, &classes, 0).unwrap();
+        assert!(first.cost > 0.0 && first.to > city::lanes::default_class(plan.graph.edges[0].class));
+        classes.0.insert(0, first.to);
+        assert!(road_upgrade(&ctx, &classes, 0).unwrap().to > first.to, "next click goes one class further");
+        classes.0.insert(0, city::lanes::LaneClass::TenLane);
+        assert!(road_upgrade(&ctx, &classes, 0).is_none());
     }
 }
