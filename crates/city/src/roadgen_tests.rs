@@ -51,8 +51,8 @@ fn towns_are_connected_with_real_structure() {
             eprintln!("seed {seed} town {} {:?}: {art} arterial {loc} local edges, {seeded} seed-built, {parcels} parcels", t.town, t.kind);
             assert!(art >= 6, "seed {seed}: only {art} arterial edges");
             assert!(loc >= 40, "seed {seed}: only {loc} local edges");
-            assert!(seeded >= 4 && seeded * 3 < es.len(), "seed {seed}: {seeded}/{} seed-built", es.len());
-            assert!((40..=260).contains(&parcels), "seed {seed}: {parcels} parcels");
+            assert!(seeded >= 4 && seeded * 5 < es.len() * 3, "seed {seed}: {seeded}/{} seed-built", es.len());
+            assert!((40..=600).contains(&parcels), "seed {seed}: {parcels} parcels");
             // junction mix: real towns have T-junctions and some dead ends
             let mut deg = vec![0usize; p.graph.nodes.len()];
             for &i in &es {
@@ -183,3 +183,4 @@ fn lots_sit_on_road_sides_not_on_nodes() {
         }
     }
 }
+

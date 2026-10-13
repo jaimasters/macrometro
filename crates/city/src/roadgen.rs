@@ -181,16 +181,24 @@ pub fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
 
 /// Plan the given city regions (one town each, grown by organic's one growth algorithm). Parcel index == growth ZoneId.
 pub fn plan_towns(seed: u64, regions: &[CityRegion]) -> TownPlan {
-    let mut plan = TownPlan::default();
-    for r in regions {
-        let (ox, oz) = r.center.origin_cell();
-        let core = Vec2::new(ox as f32 + 16.0, oz as f32 + 16.0);
-        let t = crate::organic::plan_preset(seed, hash3(seed, 0x70_0A, r.id.0 as i64, 7), core, crate::organic::Preset::SmallTown);
-        let (n0, e0) = (plan.graph.nodes.len() as u32, plan.graph.edges.len());
-        plan.graph.nodes.extend(t.graph.nodes);
-        plan.graph.edges.extend(t.graph.edges.into_iter().map(|e| REdge { a: e.a + n0, b: e.b + n0, town: r.id.0, ..e }));
-        plan.parcels.extend(t.parcels.into_iter().map(|p| Parcel { town: r.id.0, access: p.access + e0, ..p }));
-        plan.towns.extend(t.towns.into_iter().map(|m| TownMeta { town: r.id.0, core_node: m.core_node + n0, ..m }));
+    use crate::organic::{assemble, grow_town, Preset};
+    let towns = regions
+        .iter()
+        .map(|r| {
+            let (ox, oz) = r.center.origin_cell();
+            let core = Vec2::new(ox as f32 + 16.0, oz as f32 + 16.0);
+            (grow_town(seed, hash3(seed, 0x70_0A, r.id.0 as i64, 7), core, Preset::SmallTown), core)
+        })
+        .collect();
+    let mut plan = assemble(seed, towns, Preset::SmallTown);
+    for e in &mut plan.graph.edges {
+        e.town = regions[e.town as usize].id.0;
+    }
+    for p in &mut plan.parcels {
+        p.town = regions[p.town as usize].id.0;
+    }
+    for (m, r) in plan.towns.iter_mut().zip(regions) {
+        m.town = r.id.0;
     }
     plan
 }

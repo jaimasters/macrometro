@@ -570,7 +570,7 @@ mod tests {
         let after = built(&snap);
         eprintln!("5 min: {start} -> {after} built of {n}; roads {} built of {}", snap.built.iter().filter(|b| **b).count(), snap.built.len());
         assert!(after > start, "town must grow: {start} -> {after}");
-        assert!(after <= 60 && after * 2 < n, "5 min: {after} of {n} built (start {start})");
+        assert!(after <= start * 3 && after * 4 < n, "5 min: {after} of {n} built (start {start})");
     }
 
     #[test]

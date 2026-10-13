@@ -30,14 +30,14 @@ impl Preset {
     pub fn shape(self) -> (usize, f32, usize, usize) {
         match self {
             Preset::Hamlet => (1, 48.0, 4, 5),
-            Preset::SmallTown => (2, 64.0, 30, 40),
+            Preset::SmallTown => (2, 64.0, 8, 40),
             Preset::LargeTown => (2, 96.0, 90, 140),
         }
     }
 }
 
 /// Growth steps planned past the preset (the city's future, built at runtime).
-pub const FUTURE_STEPS: usize = 120;
+pub const FUTURE_STEPS: usize = 160;
 const STEP: f32 = 16.0;
 const SETBACK: f32 = 6.0;
 const HOUSE_GAP: f32 = 9.0;
@@ -58,6 +58,8 @@ pub struct Town {
     pub core: Vec2,
     world: u64,
     rng: SplitMix64,
+    /// Growth picks spots near the core: a spot `d` out is taken with chance 1 / (1 + (d / falloff)^2).
+    pub falloff: f32,
 }
 
 impl Town {
@@ -104,7 +106,7 @@ impl Town {
 
     /// The seed: `roads` skeleton roads crossing at the core, `reach` out each way (order 0 = built).
     pub fn seed(world: u64, rng_seed: u64, core: Vec2, roads: usize, reach: f32, arterial: bool) -> Self {
-        let mut t = Town { g: RoadGraph::default(), core, world, rng: SplitMix64::new(rng_seed ^ 0x0E6A_1C) };
+        let mut t = Town { g: RoadGraph::default(), core, world, rng: SplitMix64::new(rng_seed ^ 0x0E6A_1C), falloff: f32::INFINITY };
         let c = t.node(core);
         let turn = f(&mut t.rng) as f32 * std::f32::consts::TAU;
         for k in 0..roads {
@@ -123,6 +125,9 @@ impl Town {
         let (n0, e0) = (self.g.nodes.len(), self.g.edges.len());
         let n = (self.rng.next_u64() % n0 as u64) as u32;
         let p = self.g.nodes[n as usize];
+        if f(&mut self.rng) as f32 * (1.0 + (p.distance(self.core) / self.falloff).powi(2)) > 1.0 {
+            return false; // centre-weighted: the outskirts grow rarely
+        }
         let ok = match self.degree(n) {
             // extend a dead end outward, keeping its class (skeleton roads keep reaching out)
             1 => {
@@ -163,18 +168,81 @@ impl Town {
     }
 }
 
-/// A fresh town: seed + the preset's growth steps (built, order 0), then FUTURE_STEPS more of the same step as the
+/// A town's roads: seed + the preset's growth steps (built, order 0), then FUTURE_STEPS more of the same step as the
 /// plan's future (order 1..). `world` is the terrain seed, `rng_seed` varies the town.
-pub fn plan_preset(world: u64, rng_seed: u64, core: Vec2, preset: Preset) -> TownPlan {
-    let (roads, reach, steps, houses) = preset.shape();
-    let mut t = Town::seed(world, rng_seed, core, roads, reach, preset == Preset::LargeTown);
+pub fn grow_town(world: u64, rng_seed: u64, core: Vec2, preset: Preset) -> RoadGraph {
+    let (roads, reach, steps, _) = preset.shape();
+    let mut t = Town::seed(world, rng_seed, core, roads, reach, preset != Preset::Hamlet);
+    t.falloff = reach;
     t.run(steps, 0);
     for e in &mut t.g.edges {
         e.order = 0;
     }
     t.run(FUTURE_STEPS, 1);
-    let g = t.g;
-    // houses: both sides of every edge, set back, in order out from the core; skip anything crowding a road/house
+    t.g
+}
+
+/// A fresh single town (see grow_town), with its houses.
+pub fn plan_preset(world: u64, rng_seed: u64, core: Vec2, preset: Preset) -> TownPlan {
+    assemble(world, vec![(grow_town(world, rng_seed, core, preset), core)], preset)
+}
+
+/// Join town graphs into one plan: junction clearance across towns (merge_close over the whole graph), no 1-segment
+/// stubs, then houses. Town i's edges get `town = i`.
+pub fn assemble(world: u64, towns: Vec<(RoadGraph, Vec2)>, preset: Preset) -> TownPlan {
+    let mut g = RoadGraph::default();
+    let cores: Vec<Vec2> = towns.iter().map(|t| t.1).collect();
+    for (i, (t, _)) in towns.into_iter().enumerate() {
+        let n0 = g.nodes.len() as u32;
+        g.nodes.extend(t.nodes);
+        g.edges.extend(t.edges.into_iter().map(|e| REdge { a: e.a + n0, b: e.b + n0, town: i as u32, ..e }));
+    }
+    crate::junctions::merge_close(&mut g, 0, 0, |e| crate::lanes::default_class(e.class));
+    prune_stubs(&mut g);
+    for e in &mut g.edges {
+        let (a, b) = (g.nodes[e.a as usize], g.nodes[e.b as usize]);
+        e.bridge = water_run(world, a, b) > 0.0;
+    }
+    let near = |c: Vec2| (0..g.nodes.len()).min_by(|&x, &y| g.nodes[x].distance(c).total_cmp(&g.nodes[y].distance(c))).unwrap_or(0) as u32;
+    let metas = cores.iter().enumerate().map(|(i, &c)| TownMeta { town: i as u32, core: c, core_node: near(c), kind: SeedKind::Crossroads }).collect();
+    let parcels = houses(world, &g, &cores, preset);
+    TownPlan { graph: g, parcels, towns: metas }
+}
+
+/// Drop dead-end spurs one segment long off a junction (repeat until none), then unused nodes.
+fn prune_stubs(g: &mut RoadGraph) {
+    loop {
+        let inc = g.incident();
+        let stub = |e: &REdge| {
+            let (da, db) = (inc[e.a as usize].len(), inc[e.b as usize].len());
+            (da == 1 && db >= 3) || (db == 1 && da >= 3)
+        };
+        let before = g.edges.len();
+        g.edges.retain(|e| !stub(e));
+        if g.edges.len() == before {
+            break;
+        }
+    }
+    let inc = g.incident();
+    let mut map = vec![u32::MAX; g.nodes.len()];
+    let mut nodes = vec![];
+    for n in 0..g.nodes.len() {
+        if !inc[n].is_empty() {
+            map[n] = nodes.len() as u32;
+            nodes.push(g.nodes[n]);
+        }
+    }
+    g.nodes = nodes;
+    for e in &mut g.edges {
+        e.a = map[e.a as usize];
+        e.b = map[e.b as usize];
+    }
+}
+
+/// Houses on both sides of every edge, set back, nearest its town core first; never crowding a road or house, never
+/// on or driving across water. The first few per town are commercial, far ones sometimes industrial; the nearest
+/// `preset` houses on built roads start lived in.
+fn houses(world: u64, g: &RoadGraph, cores: &[Vec2], preset: Preset) -> Vec<Parcel> {
     let mut slots: Vec<(f32, Vec2, usize, f32)> = vec![];
     for (i, e) in g.edges.iter().enumerate() {
         let (a, b) = (g.nodes[e.a as usize], g.nodes[e.b as usize]);
@@ -183,48 +251,50 @@ pub fn plan_preset(world: u64, rng_seed: u64, core: Vec2, preset: Preset) -> Tow
         while s < e.len {
             for side in [1.0, -1.0] {
                 let p = a + d * s + d.perp() * side * SETBACK;
-                slots.push((p.distance(core), p, i, (-d.perp() * side).to_angle()));
+                slots.push((p.distance(cores[e.town as usize]), p, i, d.to_angle())); // long axis along the road
             }
             s += HOUSE_GAP;
         }
     }
     slots.sort_by(|x, y| x.0.total_cmp(&y.0));
-    let far = slots.last().map_or(1.0, |s| s.0);
+    let mut far = vec![1.0f32; cores.len()];
+    for s in &slots {
+        far[g.edges[s.2].town as usize] = s.0;
+    }
+    let mut count = vec![(0usize, 0usize); cores.len()]; // (houses, lived in) per town
     let mut parcels: Vec<Parcel> = vec![];
-    let mut built = 0;
     for (dist, p, access, angle) in slots {
         let road_ok = g.edges.iter().all(|e| seg_dist(p, g.nodes[e.a as usize], g.nodes[e.b as usize]) >= SETBACK - 0.5);
-        if !road_ok || parcels.iter().any(|q| q.center.distance(p) < HOUSE_GAP * 0.9) || !footprint_on_land(world, p) {
+        let (a, b) = g.pos(access);
+        let drive_dry = water_run(world, p, seg_closest(p, a, b).0) == 0.0;
+        if !road_ok || !drive_dry || parcels.iter().any(|q| q.center.distance(p) < HOUSE_GAP * 0.9) || !footprint_on_land(world, p) {
             continue;
         }
-        let k = parcels.len();
-        let kind = if k < 3 && preset != Preset::Hamlet {
+        let town = g.edges[access].town;
+        let (k, built) = &mut count[town as usize];
+        let kind = if *k < 3 && preset != Preset::Hamlet {
             ZoneKind::Commercial
-        } else if dist > far * 0.8 && k % 4 == 0 {
+        } else if dist > far[town as usize] * 0.8 && *k % 4 == 0 {
             ZoneKind::Industrial
         } else {
             ZoneKind::Residential
         };
-        let live = built < houses && g.edges[access].order <= SEED_ORDER;
-        built += live as usize;
+        let live = *built < preset.shape().3 && g.edges[access].order <= SEED_ORDER;
+        *built += live as usize;
         parcels.push(Parcel {
             center: p,
-            town: 0,
+            town,
             kind,
             access,
             angle,
             size: Vec2::new(5.0, 5.0),
-            capacity: (PEAK_CAPACITY * 0.05 / (1.0 + dist as f64 / 60.0)).max(20.0),
+            capacity: PEAK_CAPACITY * (1.0 - dist / (far[town as usize] + 30.0)).max(0.15).powf(1.3) as f64,
             start_pop: if live { 40.0 } else { 0.0 },
-            core: k == 0,
+            core: *k == 0,
         });
+        *k += 1;
     }
-    let mut g = g;
-    for e in &mut g.edges {
-        let (a, b) = (g.nodes[e.a as usize], g.nodes[e.b as usize]);
-        e.bridge = water_run(world, a, b) > 0.0;
-    }
-    TownPlan { graph: g, parcels, towns: vec![TownMeta { town: 0, core, core_node: 0, kind: SeedKind::Crossroads }] }
+    parcels
 }
 
 #[cfg(test)]
