@@ -15,6 +15,7 @@
 3. Not visually checked: whole layout (large-town character, falloff, house angles). Run the game and look.
 4. Item 2 (click a car → destination + route) not started. Then queue rows 6, 7, 5.
 5. Merge only after a visual check: `git -C /mnt/ssd/work/macrometro checkout docs/REQUIREMENTS.md`, then ff-merge.
+6. Queued from coordinator (not started): junction wiring, inter-region link, click-a-car, fast-forward 1x/4x/16x.
 Builds: scratchpad mt.sh rsyncs to Mac ~/macrometro-roads-sync and runs cargo test there.
 
 ## Queued Jai items (2026-10-13), fold into next batch
