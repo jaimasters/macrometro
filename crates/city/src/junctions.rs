@@ -135,6 +135,49 @@ pub fn junction(classes: &[LaneClass]) -> Junction {
     Junction::Roundabout(2.6 + w * 0.5)
 }
 
+/// How an at-grade junction is controlled.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Control {
+    /// Through node or dead end: nothing to obey.
+    Free,
+    /// The legs listed (indices into the classes slice) are the lesser road and give way; the rest flow freely.
+    GiveWay(Vec<usize>),
+    /// Every entering leg gives way to the ring.
+    Roundabout,
+}
+
+/// Vehicles/hour entering a give-way junction above which it is upgraded to a roundabout.
+pub const ROUNDABOUT_LOAD: f64 = 900.0;
+
+/// Control for a junction with these leg classes and `load` (vehicles/hour entering). 3/4-leg junctions start as
+/// give-way on the lesser road (the two widest legs are the major road) and become a roundabout over
+/// `ROUNDABOUT_LOAD`; never a ring at degree <= 2.
+pub fn control(classes: &[LaneClass], load: f64) -> Control {
+    if classes.len() < 3 {
+        return Control::Free;
+    }
+    if load > ROUNDABOUT_LOAD || classes.len() > 4 {
+        return Control::Roundabout;
+    }
+    let mut by_w: Vec<usize> = (0..classes.len()).collect();
+    by_w.sort_by(|&a, &b| classes[b].width().total_cmp(&classes[a].width()).then(a.cmp(&b)));
+    let mut minor = by_w[2..].to_vec();
+    minor.sort();
+    Control::GiveWay(minor)
+}
+
+/// Seconds a car entering from leg `from` waits under `c`, given conflicting flow `q` (vehicles/hour).
+/// Major-road traffic at a give-way never waits; minor legs and roundabout entries wait for a gap.
+pub fn entry_delay(c: &Control, from: usize, q: f64) -> f64 {
+    let gap = |q: f64| (q / 3600.0 * 4.0).min(0.95); // ponytail: crude gap-acceptance, swap for HCM when it matters
+    match c {
+        Control::Free => 0.0,
+        Control::GiveWay(minor) if !minor.contains(&from) => 0.0,
+        Control::GiveWay(_) => 2.0 + 6.0 * gap(q) / (1.0 - gap(q)),
+        Control::Roundabout => 1.0 + 3.0 * gap(q) / (1.0 - gap(q)),
+    }
+}
+
 /// A roundabout: cars circulate at radius `r` around `c`; `legs` are the approach angles (radians, ascending).
 #[derive(Debug, Clone)]
 pub struct Ring {
@@ -260,5 +303,30 @@ mod tests {
             assert!(if left { turn > 0.0 } else { turn < 0.0 }, "left={left}: wrong way round");
             assert!(p.iter().all(|q| (q.length() - 3.0).abs() < 1e-4));
         }
+    }
+    #[test]
+    fn give_way_by_default_roundabout_over_load_never_below_three_legs() {
+        use LaneClass::*;
+        // T with a main road: the side street gives way
+        assert_eq!(control(&[TwoLaneLow, Street, TwoLaneLow], 100.0), Control::GiveWay(vec![1]));
+        // crossroads: the two lesser legs give way
+        assert_eq!(control(&[Street, FourLane, Street, FourLane], 100.0), Control::GiveWay(vec![0, 2]));
+        // upgrade over the load threshold
+        assert_eq!(control(&[TwoLaneLow, Street, TwoLaneLow], ROUNDABOUT_LOAD + 1.0), Control::Roundabout);
+        // never a ring at degree <= 2, however busy
+        for n in 0..3 {
+            assert_eq!(control(&vec![FourLane; n], 1e6), Control::Free);
+        }
+    }
+
+    #[test]
+    fn major_road_flows_and_minor_road_obeys_give_way() {
+        let c = control(&[LaneClass::TwoLaneLow, LaneClass::Street, LaneClass::TwoLaneLow], 400.0);
+        assert_eq!(entry_delay(&c, 0, 600.0), 0.0);
+        assert_eq!(entry_delay(&c, 2, 600.0), 0.0);
+        let quiet = entry_delay(&c, 1, 100.0);
+        let busy = entry_delay(&c, 1, 600.0);
+        assert!(quiet > 0.0 && busy > quiet, "{quiet} {busy}");
+        assert_eq!(entry_delay(&Control::Free, 0, 600.0), 0.0);
     }
 }
