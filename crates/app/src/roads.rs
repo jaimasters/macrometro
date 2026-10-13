@@ -142,7 +142,7 @@ struct CarDot(usize);
 
 /// A roundabout surface or island, shown once road `.0` (one of its legs) is built.
 #[derive(Component)]
-struct RingDisc(usize);
+struct RingDisc(usize, (u32, u32));
 
 #[derive(Resource)]
 struct RoadMats {
@@ -195,6 +195,12 @@ struct Journey {
     slot: usize,
     /// Per route segment: on a roundabout ring (ring traffic has priority over entering cars).
     ring: Vec<bool>,
+    /// Per route segment: Some(true) entering a give-way junction from a minor leg, Some(false) from the major road.
+    gw: Vec<Option<bool>>,
+    /// Per route segment ending at a ring entry: the commit-zone length (the ring's radius).
+    zone: Vec<f32>,
+    /// Committed to the next ring entry: decided with a clear gap, enters without stopping.
+    commit: bool,
 }
 
 #[derive(Resource)]
@@ -204,6 +210,37 @@ struct Journeys {
     rng: SplitMix64,
     router: Router,
     rings: Rings,
+    /// Give-way junctions (3/4 legs under the load threshold), keyed like `rings`.
+    gw: std::collections::HashMap<(u32, u32), GiveWay>,
+}
+
+struct GiveWay {
+    legs: Vec<usize>,
+    cls: Vec<city::lanes::LaneClass>,
+    /// Edge ids of the lesser road's legs: cars arriving on them yield.
+    minor: Vec<usize>,
+    /// The ring this junction becomes once upgraded.
+    ring: city::junctions::Ring,
+}
+
+/// Vehicles/hour a leg carries at v/c = 1. ponytail: one flat figure, per-class capacity when it matters.
+const LEG_CAP: f64 = 600.0;
+
+/// Per route segment: Some(minor leg?) when the segment ends at a give-way junction.
+fn give_way_flags(t: &Trip, gw: &std::collections::HashMap<(u32, u32), GiveWay>) -> Vec<Option<bool>> {
+    (0..t.pts.len().saturating_sub(1)).map(|k| gw.get(&pkey(t.pts[k + 1])).map(|g| g.minor.contains(&t.seg_edge[k]))).collect()
+}
+
+/// Upgrade every give-way junction whose entering load passes the threshold to a roundabout.
+fn upgrade_junctions(gw: &mut std::collections::HashMap<(u32, u32), GiveWay>, rings: &mut Rings, vc: &[f32]) {
+    let up: Vec<_> = gw.iter().filter(|(_, g)| {
+        let load = g.legs.iter().map(|&e| vc.get(e).copied().unwrap_or(0.0) as f64 * LEG_CAP).sum();
+        city::junctions::control(&g.cls, load) == city::junctions::Control::Roundabout
+    }).map(|(k, _)| *k).collect();
+    for k in up {
+        let g = gw.remove(&k).unwrap();
+        rings.insert(k, g.ring);
+    }
 }
 
 /// Free-flow speed on the car's current segment, slowed by congestion.
@@ -234,7 +271,7 @@ impl Journey {
     /// A parked car at the start of its route's lane, facing along it (spawn only; it drives itself from here).
     fn new(trip: Trip, left: bool, slot: usize) -> Self {
         let (pos, d) = (lane_pt(&trip, 0, 0.0, left), seg_dir(&trip, 0));
-        Journey { pos, head: d.y.atan2(d.x), steer: 0.0, left, trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot, ring: vec![] }
+        Journey { pos, head: d.y.atan2(d.x), steer: 0.0, left, trip, seg: 0, along: 0.0, v: 0.0, wait: 0.0, slot, ring: vec![], gw: vec![], zone: vec![], commit: false }
     }
     fn dir(&self) -> Vec2 {
         Vec2::from_angle(self.head)
@@ -384,26 +421,40 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
     }
     let junc = |p: Vec2| nb.get(&pkey(p)).is_some_and(|v| v.len() >= 3);
     let on_ring = |c: &Journey, s: usize| c.ring.get(s).copied().unwrap_or(false);
-    // give way: a car about to enter a ring waits while a ring car is approaching its entry point (on the ring, the
-    // point is among its next two, within YIELD). ponytail: Euclidean distance, path distance if rings get large.
+    // give way: a car about to enter a ring waits while ANY circulating car is within YIELD of its entry point (the
+    // conflict gap). ponytail: Euclidean distance, path distance if rings get large.
     const YIELD: f32 = 7.0;
+    // commit zone: within one ring radius of the entry a car decides once the gap is clear; until then it must be
+    // able to stop at the entry line (the entry point), and it stops there while the gap is not clear
+    let ahead: Vec<Option<(f32, f32, Vec2)>> = cars.iter().map(|c| ring_ahead(c)).collect();
+    for i in 0..cars.len() {
+        let Some((d, zone, p)) = ahead[i] else { cars[i].commit = false; continue };
+        if !cars[i].commit && d <= zone {
+            let clear = !cars.iter().enumerate().any(|(k, o)| k != i && on_ring(o, o.seg) && o.pos.distance(p) < YIELD);
+            cars[i].commit = clear;
+        }
+    }
+    let yields: Vec<bool> = vec![false; cars.len()];
+    // give-way junctions: a minor-leg car waits while a major-road car is approaching the same junction
+    let gw_at = |c: &Journey, s: usize| c.gw.get(s).copied().flatten();
     let yields: Vec<bool> = (0..cars.len()).map(|i| {
         let c = &cars[i];
-        c.seg + 2 < c.trip.pts.len() && !on_ring(c, c.seg) && on_ring(c, c.seg + 1) && {
+        yields[i] || (gw_at(c, c.seg) == Some(true) && c.seg + 1 < c.trip.pts.len() && {
             let p = c.trip.pts[c.seg + 1];
-            cars.iter().enumerate().any(|(k, o)| {
-                k != i && on_ring(o, o.seg) && o.pos.distance(p) < YIELD && o.trip.pts[o.seg + 1..(o.seg + 3).min(o.trip.pts.len())].contains(&p)
-            })
-        }
+            cars.iter().enumerate().any(|(k, o)| k != i && gw_at(o, o.seg) == Some(false) && o.trip.pts.get(o.seg + 1) == Some(&p) && o.pos.distance(p) < 2.0 * YIELD)
+        })
     }).collect();
     let must_yield = |i: usize| yields[i];
+    // an uncommitted ring approacher claims no junction: it stops at its own give-way line
+    let waits: Vec<bool> = (0..cars.len()).map(|i| ahead[i].is_some() && !cars[i].commit).collect();
+    let waits_ring = |i: usize| waits[i];
     for (i, c) in cars.iter().enumerate() {
         if c.seg > 0 && c.along < JUNC && junc(c.trip.pts[c.seg]) && !thru(c, c.seg - 1) {
             held.entry(pkey(c.trip.pts[c.seg])).or_insert(i);
         }
     }
     for (i, c) in cars.iter().enumerate() {
-        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC && junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && !must_yield(i) {
+        if c.seg + 2 < c.trip.pts.len() && seg_len(c) - c.along < JUNC && junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && !must_yield(i) && !waits_ring(i) {
             held.entry(pkey(c.trip.pts[c.seg + 1])).or_insert(i);
         }
     }
@@ -423,14 +474,20 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
                 let (exit, dn) = (lane_pt(&c.trip, c.seg + 1, 0.0, c.left), seg_dir(&c.trip, c.seg + 1));
                 let blocked = cars.iter().enumerate().any(|(k, o)| k != i && o.pos.distance(exit) < CAR_LEN + CAR_GAP && (o.pos - exit).dot(dn) > -0.5 && o.dir().dot(dn) > 0.7);
                 let room = !blocked || !junc(c.trip.pts[c.seg + 1]);
-                if junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && (held.get(&node).is_some_and(|&h| h != i) || !room || must_yield(i)) && boss != Some(i) {
+                if junc(c.trip.pts[c.seg + 1]) && !thru(c, c.seg) && ((held.get(&node).is_some_and(|&h| h != i) || !room) && boss != Some(i) || must_yield(i)) {
                     gap = gap.min(len - JUNC - c.along + CAR_GAP);
-                } else if !thru(c, c.seg) && len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
+                } else if !thru(c, c.seg) && !waits_ring(i) && len - c.along < JUNC + c.v * c.v / (2.0 * CAR_BRAKE) + 0.5 {
                     held.insert(node, i);
                 }
             }
         }
-        let free_v = target_speed(c, &slow).min(c.corner_speed());
+        let mut free_v = target_speed(c, &slow).min(c.corner_speed());
+        // approaching a ring: always able to stop at the entry line (JUNC before the node), then creep in
+        let stop = match (ahead[i], c.commit) { (Some((d, _, _)), false) => Some(stop_room(d)), _ => None };
+        if let Some(s) = stop {
+            // brake for where the car will be after this tick, so the profile never lags the line
+            free_v = free_v.min((2.0 * CAR_BRAKE * (s - c.v * dt).max(0.0)).sqrt());
+        }
         let vmax = if gap.is_finite() { free_v.min((2.0 * CAR_BRAKE * (gap - CAR_GAP).max(0.0)).sqrt()) } else { free_v };
         let c = &mut cars[i];
         c.v += (vmax - c.v).clamp(-CAR_BRAKE * dt, CAR_ACCEL * dt);
@@ -440,11 +497,56 @@ fn follow_step(cars: &mut Vec<Journey>, dt: f32, slow: impl Fn(usize) -> f32, fr
         if gap.is_finite() {
             c.v = c.v.min((gap - CAR_GAP * 0.5).max(0.0) / dt);
         }
+        if let Some(s) = stop {
+            c.v = c.v.min(s / dt);
+        }
         c.drive(dt);
         keep.push(!c.arrived());
     }
     let mut k = keep.into_iter();
     cars.retain(|_| k.next().unwrap_or(true));
+}
+
+/// Next ring entry within this or the next segment: (route distance to the entry point, commit-zone length, entry point).
+fn ring_ahead(c: &Journey) -> Option<(f32, f32, Vec2)> {
+    let on = |s: usize| c.ring.get(s).copied().unwrap_or(false);
+    if on(c.seg) {
+        return None;
+    }
+    // look ahead far enough to brake from any road speed
+    let mut d = seg_len(c) - c.along;
+    let mut e = c.seg + 1;
+    while e + 1 < c.trip.pts.len() && !on(e) {
+        if d > 40.0 {
+            return None;
+        }
+        d += c.trip.pts[e].distance(c.trip.pts[e + 1]);
+        e += 1;
+    }
+    if !on(e) {
+        return None;
+    }
+    Some((d, c.zone.get(e - 1).copied().unwrap_or(3.0), c.trip.pts[e]))
+}
+
+/// Commit-zone length per segment: the radius of the ring the segment enters (0 elsewhere).
+fn ring_zones(t: &Trip, on: &[bool], rings: &Rings) -> Vec<f32> {
+    (0..on.len()).map(|k| {
+        let entry = k + 1 < on.len() && !on[k] && on[k + 1];
+        if !entry {
+            return 0.0;
+        }
+        let p = t.pts[k + 1];
+        rings.values().find(|r| (r.c.distance(p) - r.r).abs() < 0.6).map_or(3.0, |r| r.r)
+    }).collect()
+}
+
+/// The give-way line sits this far before the ring entry point, so a waiting car's nose stays off the ring lane.
+const STOP_BACK: f32 = CAR_LEN * 0.5 + LANE_OFF + 0.3;
+
+/// Distance left to the give-way line for a ring entry `d` ahead.
+fn stop_room(d: f32) -> f32 {
+    (d - STOP_BACK).max(0.0)
 }
 
 type Rings = std::collections::HashMap<(u32, u32), city::junctions::Ring>;
@@ -544,19 +646,33 @@ fn spawn_roads(
     // neighbouring rings cannot overlap (organic::junction_gap + Ring::at 40% leg cap)
     let inc = cp.plan.graph.incident();
     let cls = |e: usize| city::lanes::default_class(cp.plan.graph.edges[e].class);
-    let rings: Rings = (0..inc.len()).filter_map(|n| city::junctions::Ring::at(&cp.plan.graph, &inc[n], n, cls).map(|r| (pkey(r.c), r))).collect();
+    // every 3/4-leg junction starts as give-way on the lesser road; busy ones become rings (upgrade_junctions)
+    let mut rings = Rings::new();
+    let mut gw = std::collections::HashMap::new();
+    for n in 0..inc.len() {
+        let Some(r) = city::junctions::Ring::at(&cp.plan.graph, &inc[n], n, cls) else { continue };
+        let lc: Vec<_> = inc[n].iter().map(|&e| cls(e)).collect();
+        match city::junctions::control(&lc, 0.0) {
+            city::junctions::Control::GiveWay(minor) => {
+                gw.insert(pkey(r.c), GiveWay { legs: inc[n].clone(), minor: minor.iter().map(|&i| inc[n][i]).collect(), cls: lc, ring: r });
+            }
+            _ => {
+                rings.insert(pkey(r.c), r);
+            }
+        }
+    }
     let disc = meshes.add(Cylinder::new(1.0, 1.0));
     let island = flat(Color::srgb(0.55, 0.66, 0.45));
-    for r in rings.values() {
+    for r in rings.values().chain(gw.values().map(|g| &g.ring)) {
         let e = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].first().copied().unwrap_or(0);
         let at = |rad: f32, y: f32| Transform::from_xyz(r.c.x, y, r.c.y).with_scale(Vec3::new(rad, 0.02, rad));
         let major = inc[cp.plan.graph.nodes.iter().position(|&p| p == r.c).unwrap_or(0)].iter().any(|&k| cp.plan.graph.edges[k].class == RoadClass::Arterial);
-        commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(m.base[major as usize].clone()), at(r.r + 1.0, Y_ROAD + 0.03), Visibility::Hidden));
-        commands.spawn((RingDisc(e), Mesh3d(disc.clone()), MeshMaterial3d(island.clone()), at((r.r - 1.0).max(0.4), Y_ROAD + 0.09), Visibility::Hidden));
+        commands.spawn((RingDisc(e, pkey(r.c)), Mesh3d(disc.clone()), MeshMaterial3d(m.base[major as usize].clone()), at(r.r + 1.0, Y_ROAD + 0.03), Visibility::Hidden));
+        commands.spawn((RingDisc(e, pkey(r.c)), Mesh3d(disc.clone()), MeshMaterial3d(island.clone()), at((r.r - 1.0).max(0.4), Y_ROAD + 0.09), Visibility::Hidden));
     }
     commands.insert_resource(MarkAssets(rect.clone(), flat(Color::srgb(0.97, 0.97, 0.94)), flat(Color::srgb(0.98, 0.78, 0.12))));
     commands.insert_resource(m);
-    commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan), rings });
+    commands.insert_resource(Journeys { cars: vec![], acc: 0.0, rng: SplitMix64::new(0xCA75), router: Router::new(&cp.plan), rings, gw });
 }
 
 /// Road markings at every zoom: rebuilt when classes or the driving side change, stroke scaled with the view.
@@ -638,6 +754,7 @@ fn update_roads(
     mut casings: Query<(&RoadCasing, &mut Visibility), Without<RoadEdge>>,
     mut drives: Query<(&Driveway, &mut Visibility), (Without<RoadEdge>, Without<RoadCasing>)>,
     mut discs: Query<(&RingDisc, &mut Visibility), (Without<RoadEdge>, Without<RoadCasing>, Without<Driveway>)>,
+    j: Res<Journeys>,
 ) {
     let s = link.snapshots.latest();
     let zoomed_out = cam.as_ref().map_or(true, |c| c.view_h > TINT_VIEW);
@@ -663,7 +780,7 @@ fn update_roads(
         }
     }
     for (d, mut v) in &mut discs {
-        let want = vis(s.built.get(d.0).copied().unwrap_or(false));
+        let want = vis(s.built.get(d.0).copied().unwrap_or(false) && j.rings.contains_key(&d.1));
         if *v != want {
             *v = want;
         }
@@ -709,6 +826,7 @@ fn drive_cars(
     let dt = time.delta_secs().min(0.1);
     let slow = |e: usize| s.slow.get(e).copied().unwrap_or(1.0);
     follow_step(&mut j.cars, dt, slow, |e| classes.0.get(&e).is_some_and(|&c| city::junctions::is_freeway(c)));
+    { let j = &mut *j; upgrade_junctions(&mut j.gw, &mut j.rings, &s.vc); }
     j.acc = (j.acc + s.car_trips * SAMPLE * dt).min(6.0);
     while j.acc >= 1.0 && j.cars.len() < MAX_CARS {
         j.acc -= 1.0;
@@ -719,8 +837,10 @@ fn drive_cars(
             if !j.cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts.first() == trip.pts.first()) {
                 let mut trip = trip;
                 let ring = ring_trip(&mut trip, &j.rings, hand.0);
+                let gw = give_way_flags(&trip, &j.gw);
+                let zone = ring_zones(&trip, &ring, &j.rings);
                 let slot = (0..MAX_CARS).find(|k| !j.cars.iter().any(|c| c.slot == *k)).unwrap_or(0);
-                j.cars.push(Journey { ring, ..Journey::new(trip, hand.0, slot) });
+                j.cars.push(Journey { ring, gw, zone, ..Journey::new(trip, hand.0, slot) });
             }
         }
     }
@@ -982,8 +1102,9 @@ mod tests {
                     let trip = Trip { from: 0, to: 1, pts: vec![arm(d) * 1.5, arm(d), Vec2::ZERO, arm(out), arm(out) * 1.5], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
                     let mut trip = trip;
                     let ring = ring_trip(&mut trip, &rings, true);
+                    let zone = ring_zones(&trip, &ring, &rings);
                     if !cars.iter().any(|c| c.seg == 0 && c.along < CAR_LEN + CAR_GAP && c.trip.pts[0] == trip.pts[0]) {
-                        cars.push(Journey { ring, ..Journey::new(trip, true, 0) });
+                        cars.push(Journey { ring, zone, ..Journey::new(trip, true, 0) });
                     }
                 }
             }
@@ -992,7 +1113,27 @@ mod tests {
                 c.slot = k + step * 100;
             }
             let left: Vec<(usize, f32)> = cars.iter().map(|c| (c.slot, (c.seg..c.trip.pts.len() - 1).map(|s| c.trip.pts[s].distance(c.trip.pts[s + 1])).sum::<f32>() - c.along)).collect();
+            let on = |c: &Journey, s: usize| c.ring.get(s).copied().unwrap_or(false);
+            let before: Vec<(usize, bool, Option<(f32, f32, Vec2)>)> = cars.iter().map(|c| (c.slot, c.commit, ring_ahead(c))).collect();
+            let circling: Vec<(usize, Vec2)> = cars.iter().filter(|c| on(c, c.seg)).map(|c| (c.slot, c.pos)).collect();
             follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
+            for c in &cars {
+                let &(_, was_commit, was_ahead) = before.iter().find(|b| b.0 == c.slot).unwrap();
+                let Some((d0, zone, p)) = was_ahead else { continue };
+                if c.commit && !was_commit {
+                    // decided only inside the zone, and only with a clear gap
+                    assert!(d0 <= zone + 1e-3, "car {} committed {d0} out (zone {zone}) at step {step}", c.slot);
+                    assert!(!circling.iter().any(|&(id, q)| id != c.slot && q.distance(p) < 7.0), "car {} committed into a busy gap at step {step}", c.slot);
+                }
+                if on(c, c.seg) {
+                    assert!(was_commit || c.commit, "car {} entered the ring uncommitted at step {step}", c.slot);
+                    assert!(cars.iter().all(|o| o.slot == c.slot || !on(o, o.seg) || o.pos.distance(c.pos) >= CAR_LEN), "car {} in conflict on entry at step {step}", c.slot);
+                } else if !c.commit {
+                    // uncommitted: always able to stop at the entry line
+                    let (d, _, _) = ring_ahead(c).unwrap();
+                    assert!(c.v * c.v / (2.0 * CAR_BRAKE) <= stop_room(d) + 0.05, "car {} at {} cannot stop {d} before the entry line", c.slot, c.v);
+                }
+            }
             done += n - cars.len();
             for (id, rest) in left.into_iter().filter(|(id, _)| !cars.iter().any(|c| c.slot == *id)) {
                 assert!(rest < 0.5, "car {id} removed {rest} short of its destination at step {step}");
@@ -1023,7 +1164,8 @@ mod tests {
         let trip = |a: Vec2, b: Vec2| Trip { from: 0, to: 1, pts: vec![a * 18.0, a * 12.0, Vec2::ZERO, b * 12.0, b * 18.0], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
         let car = |mut t: Trip| {
             let ring = ring_trip(&mut t, &rings, true);
-            Journey { ring, ..Journey::new(t, true, 0) }
+            let zone = ring_zones(&t, &ring, &rings);
+            Journey { ring, zone, ..Journey::new(t, true, 0) }
         };
         // clockwise on screen: negative signed turn in screen (y-up) coordinates
         let j = car(trip(Vec2::X, -Vec2::X));
@@ -1061,6 +1203,42 @@ mod tests {
             assert!(cars[0].seg < 2, "A entered the ring ahead of the approaching ring car");
         }
         panic!("ring car never passed the entry");
+    }
+
+    /// Give-way junction: a car on the lesser road waits at its line while a major-road car approaches, and the
+    /// junction upgrades to a roundabout once its entering load passes the threshold.
+    #[test]
+    fn give_way_minor_yields_and_load_upgrades() {
+        use city::lanes::LaneClass;
+        let trip = |a: Vec2, b: Vec2| Trip { from: 0, to: 1, pts: vec![a * 18.0, a * 12.0, Vec2::ZERO, b * 12.0, b * 18.0], seg_edge: vec![0, 1, 2, 3], seg_speed: vec![4.0; 4], nodes: vec![], edges: vec![] };
+        let mut major = Journey::new(trip(-Vec2::X, Vec2::X), true, 0);
+        major.gw = vec![None, Some(false), None, None];
+        let mut minor = Journey::new(trip(-Vec2::Y, -Vec2::X), true, 1);
+        minor.trip.seg_edge = vec![4, 5, 6, 7];
+        minor.gw = vec![None, Some(true), None, None];
+        // minor car near its line, major car well back but approaching
+        (minor.pos, minor.v) = (lane_pt(&minor.trip, 1, 12.0 - JUNC - 0.5, true), 1.0);
+        minor.track();
+        (major.pos, major.v) = (lane_pt(&major.trip, 1, 2.0, true), 4.0);
+        major.track();
+        let mut cars = vec![minor, major];
+        for _ in 0..600 {
+            follow_step(&mut cars, 0.05, |_| 1.0, |_| false);
+            let major_past = cars.iter().find(|c| c.slot == 0).map_or(true, |c| c.seg >= 2);
+            if major_past {
+                break;
+            }
+            assert!(cars[0].seg < 2, "minor-road car entered ahead of the approaching major-road car");
+        }
+        assert!(cars.iter().find(|c| c.slot == 0).map_or(true, |c| c.seg >= 2), "major car never passed");
+        // load: a 3-leg give-way upgrades only past the roundabout threshold
+        let ring = city::junctions::Ring { c: Vec2::ZERO, r: 3.0, legs: vec![] };
+        let g = || GiveWay { legs: vec![0, 1, 2], cls: vec![LaneClass::FourLane, LaneClass::FourLane, LaneClass::Street], minor: vec![2], ring: ring.clone() };
+        let (mut gw, mut rings) = (std::collections::HashMap::from([((0, 0), g())]), Rings::new());
+        upgrade_junctions(&mut gw, &mut rings, &[0.1, 0.1, 0.1]);
+        assert!(rings.is_empty() && gw.len() == 1, "light load stays give-way");
+        upgrade_junctions(&mut gw, &mut rings, &[1.0, 1.0, 1.0]);
+        assert!(gw.is_empty() && rings.len() == 1, "heavy load upgrades to a roundabout");
     }
 
     #[test]
