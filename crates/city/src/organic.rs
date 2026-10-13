@@ -315,6 +315,71 @@ mod tests {
         }
     }
 
+    fn components(g: &RoadGraph, keep: impl Fn(&REdge) -> bool) -> usize {
+        let mut up: Vec<usize> = (0..g.nodes.len()).collect();
+        fn root(up: &mut [usize], mut i: usize) -> usize { while up[i] != i { up[i] = up[up[i]]; i = up[i]; } i }
+        let mut used = vec![false; g.nodes.len()];
+        for e in g.edges.iter().filter(|e| keep(e)) {
+            let (a, b) = (root(&mut up, e.a as usize), root(&mut up, e.b as usize));
+            up[a] = b;
+            used[e.a as usize] = true;
+            used[e.b as usize] = true;
+        }
+        (0..g.nodes.len()).filter(|&n| used[n] && root(&mut up, n) == n).count()
+    }
+
+    #[test]
+    fn every_town_road_graph_is_one_component() {
+        for seed in [1, 2, 3, 7, 42, 99] {
+            for p in [Preset::Hamlet, Preset::SmallTown, Preset::LargeTown] {
+                let plan = plan_preset(seed, seed * 31, Vec2::new(5000.0, 5000.0), p);
+                assert_eq!(components(&plan.graph, |_| true), 1, "seed {seed} {p:?}");
+            }
+            let regions = world_gen::generate_cities(seed, 3);
+            let plan = crate::roadgen::plan_towns(seed, &regions[..2]);
+            for t in &plan.towns {
+                assert_eq!(components(&plan.graph, |e| e.town == t.town), 1, "plan_towns seed {seed} town {}", t.town);
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_but_bridges_sits_on_water() {
+        for seed in [1, 2, 3, 7, 42, 99] {
+            let regions = world_gen::generate_cities(seed, 3);
+            let plan = crate::roadgen::plan_towns(seed, &regions[..2]);
+            let g = &plan.graph;
+            for e in &g.edges {
+                let wet = water_run(seed, g.nodes[e.a as usize], g.nodes[e.b as usize]) > 0.0;
+                assert!(!wet || e.bridge, "seed {seed}: wet road not marked bridge");
+            }
+            for (i, z) in plan.parcels.iter().enumerate() {
+                assert_eq!(water_run(seed, z.center, z.center + Vec2::X), 0.0, "seed {seed}: plot {i} on water");
+                let (a, b) = g.pos(z.access);
+                assert!(water_run(seed, z.center, seg_closest(z.center, a, b).0) == 0.0, "seed {seed}: plot {i} driveway over water");
+            }
+        }
+    }
+
+    #[test]
+    fn growth_is_centre_weighted() {
+        for seed in [1, 2, 3, 7, 42] {
+            for p in [Preset::SmallTown, Preset::LargeTown] {
+                let core = Vec2::new(5000.0, 5000.0);
+                let plan = plan_preset(seed, seed * 31, core, p);
+                let mut d: Vec<f32> = plan.parcels.iter().map(|z| z.center.distance(core)).collect();
+                d.sort_by(|a, b| a.total_cmp(b));
+                let (med, far) = (d[d.len() / 2], d[d.len() - 1]);
+                assert!(med < 0.6 * far, "seed {seed} {p:?}: median {med}, far {far}");
+                // plots per unit area: inner disc beats the outer annulus
+                let r = far / 2.0;
+                let inner = d.iter().filter(|&&x| x < r).count() as f32 / (r * r);
+                let outer = d.iter().filter(|&&x| x >= r).count() as f32 / (far * far - r * r);
+                assert!(inner > 1.5 * outer, "seed {seed} {p:?}: density {inner} vs {outer}");
+            }
+        }
+    }
+
     #[test]
     fn fresh_multi_town_cities_keep_junction_clearance() {
         for seed in [1, 2, 3, 7, 42, 99] {
